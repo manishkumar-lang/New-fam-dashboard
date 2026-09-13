@@ -5,7 +5,8 @@ const AppState = {
   route: 'overview',
   routeParams: {},
   globalFilters: { category: '', status: '', location: '' },
-  currentUser: { name: 'Local Admin', role: 'Admin' },
+  currentUser: null,
+  adminEmail: 'manish.kumar@wellversed.in',
 };
 
 const NAV_SECTIONS = [
@@ -23,122 +24,158 @@ const NAV_SECTIONS = [
     { id: 'referencing', label: 'Referencing', icon: 'link' },
     { id: 'knowledge', label: 'Knowledge Base', icon: 'book' },
   ]},
+  { title: 'Personal', items: [
+    { id: 'personal', label: 'My Workspace', icon: 'user' },
+  ]},
   { title: 'System', items: [
-    { id: 'admin', label: 'Admin', icon: 'settings' },
-    { id: 'trash', label: 'Trash', icon: 'trash' },
+    { id: 'admin', label: 'Admin', icon: 'settings', adminOnly: true },
+    { id: 'trash', label: 'Trash', icon: 'trash', adminOnly: true },
   ]},
 ];
 
 const PAGE_RENDERERS = {}; // populated by page-*.js files: PAGE_RENDERERS.overview = async (root) => {...}
 const PAGE_TITLES = {
   overview: 'Overview', analytics: 'Analytics', vendors: 'Vendor Matrix', contacts: 'Vendor Contacts', solutions: 'Solution Matrix',
-  categories: 'Categories', referencing: 'Referencing', knowledge: 'Knowledge Base', admin: 'Admin',
+  categories: 'Categories', referencing: 'Referencing', knowledge: 'Knowledge Base', personal: 'My Workspace', admin: 'Admin',
   trash: 'Trash',
 };
 
 /** ================= Boot ================= */
 async function boot() {
   document.documentElement.setAttribute('data-theme', AppState.theme);
-  // Never block the dashboard on the remote Google Sheets function. The
-  // bundled snapshot is the guaranteed boot source; live sync happens in the
-  // background after the UI is usable. This prevents a slow/missing Netlify
-  // Function from producing the misleading "initialization timed out" screen.
+  // Privacy-first boot: never seed or render dashboard data before a verified
+  // Google account is present. The public site contains code only; live data is
+  // fetched server-side after authentication.
   try {
-    await ensureSeededLocalFirst();
-  } catch (err) {
-    console.error('Dashboard local boot failed:', err);
-    const overlay = document.getElementById('boot-overlay');
-    if (overlay) {
-      overlay.innerHTML = `<div style="max-width:620px;text-align:center;padding:28px;">
-        <div style="font-size:42px;margin-bottom:12px;">⚠</div>
-        <div style="font-family:Sora,sans-serif;font-weight:700;font-size:18px;margin-bottom:8px;">Dashboard data could not be initialized</div>
-        <div style="font-size:13px;color:#b9c0e8;line-height:1.6;margin-bottom:18px;">${escapeHtml(err.message || 'Unknown startup error')}</div>
-        <button onclick="location.reload()" style="border:0;border-radius:10px;padding:10px 18px;cursor:pointer;margin-right:8px;">Reload Dashboard</button>
-        <button onclick="window.__wvForceContinue && window.__wvForceContinue()" style="border:1px solid #3a4180;background:transparent;color:#c7cbee;border-radius:10px;padding:10px 18px;cursor:pointer;">Continue anyway (offline mode)</button>
-      </div>`;
+    if (window.WVAuth) WVAuth.init();
+    const user = window.WVAuth?.user;
+    const credential = window.WVAuth?.getCredential?.() || '';
+    if (!user || !credential) {
+      renderLoginGate();
+      return;
     }
-    return;
+    await db.activateForUser(user.email);
+    // Keep the existing dashboard baseline, but do not hydrate/render it until
+    // a verified Google account is present. This gives an immediate dashboard
+    // after login while the authenticated Sheets sync runs in the background.
+    if (window.SEED_DATA && Array.isArray(window.SEED_DATA.vendorMatrixRecords)) {
+      await db.seedFromBundle(window.SEED_DATA);
+    }
+    AppState.currentUser = {...user, role: isAdminUser() ? 'Admin' : 'Member'};
+    renderShell();
+    if (window.WVAuth) WVAuth.init();
+    setupGlobalSearch();
+    handleRoute();
+    // Always validate the current Google credential against the server and
+    // replace the baseline with the latest shared Google Sheets data.
+    refreshRemoteInBackground({mountIfNeeded:false});
+  } catch (err) {
+    console.error('Dashboard secure boot failed:', err);
+    renderAuthError(err.message || 'Unable to load the secure workspace.');
   }
-  window.CATEGORY_COLORS_MAP = CATEGORY_COLORS;
-  renderShell();
-  // Google auth initializes before the app shell is rendered on some loads.
-  // Re-run it after the shell exists so #google-user/#google-signin is rendered.
-  if (window.WVAuth) WVAuth.init();
-  if (!window.__wvListenersAttached) {
-    window.__wvListenersAttached = true;
-    window.addEventListener('hashchange', handleRoute);
-    setupKeyboardShortcuts();
-  }
-  setupGlobalSearch(); // rebinds to the fresh search input renderShell() just created
-  handleRoute();
 }
 
-// Manual escape hatch wired to the "Continue anyway" button in index.html.
-// If storage init is truly stuck (some corporate Chrome policies leave
-// indexedDB.open() neither resolving nor rejecting), this bypasses it by
-// forcing the DataService into in-memory mode and re-running boot. Data
-// won't persist across a reload in that mode, but the dashboard becomes
-// usable immediately rather than staying stuck.
-window.__wvForceContinue = function () {
-  console.warn('Forcing continue past storage initialization — switching to in-memory mode.');
-  db.mode = 'memory';
-  db.ready = Promise.resolve(null);
-  boot();
+function isAdminUser() {
+  return String(window.WVAuth?.user?.email || '').toLowerCase() === AppState.adminEmail.toLowerCase();
+}
+
+function renderLoginGate() {
+  const app = document.getElementById('app');
+  if (!app) return;
+  app.innerHTML = `<div class="login-screen">
+    <div class="login-card">
+      <div class="login-brand"><img src="assets/wellversed-reference.png" alt="Wellversed"></div>
+      <div class="login-lock">${wvIcon('lock', 26)}</div>
+      <h1>Welcome to FAM Intelligence</h1>
+      <p>Sign in with your Wellversed Google account to access the dashboard. No dashboard data is displayed before authentication.</p>
+      <div id="login-google-signin" class="login-google-host"></div>
+      <div class="login-security"><span>🔒</span><span>Secure Google Workspace authentication</span></div>
+      <div class="login-note">Only verified <b>@wellversed.in</b> accounts are allowed.</div>
+    </div>
+  </div>`;
+  setTimeout(() => window.WVAuth?.renderButton?.(), 0);
+}
+
+function renderAuthLoading(title, message) {
+  const app = document.getElementById('app');
+  if (!app) return;
+  app.innerHTML = `<div class="login-screen"><div class="login-card loading-card">
+    <div class="login-brand"><img src="assets/wellversed-reference.png" alt="Wellversed"></div>
+    <div class="secure-spinner"></div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p>
+  </div></div>`;
+}
+
+function renderAuthError(message) {
+  const app = document.getElementById('app');
+  if (!app) return;
+  app.innerHTML = `<div class="login-screen"><div class="login-card">
+    <div class="login-brand"><img src="assets/wellversed-reference.png" alt="Wellversed"></div>
+    <div class="login-lock">${wvIcon('lock', 26)}</div><h1>Workspace unavailable</h1>
+    <p>${escapeHtml(message)}</p><button class="btn btn-primary" id="auth-retry">Try again</button>
+    <div class="login-note">If your account is signed in, this may be a temporary Google Sheets connection issue.</div>
+  </div></div>`;
+  document.getElementById('auth-retry').onclick = () => location.reload();
+}
+
+window.__wvShowLoginGate = function() { renderLoginGate(); };
+
+window.__wvOnAuthenticated = async function(user) {
+  try {
+    AppState.currentUser = {...user, role: isAdminUser() ? 'Admin' : 'Member'};
+    renderAuthLoading('Signing you in securely…', 'Loading your workspace and the latest shared dashboard data.');
+    await db.activateForUser(user.email);
+    if (window.SEED_DATA && Array.isArray(window.SEED_DATA.vendorMatrixRecords)) {
+      await db.seedFromBundle(window.SEED_DATA);
+    }
+    renderShell();
+    if (window.WVAuth) WVAuth.init();
+    setupGlobalSearch();
+    handleRoute();
+    refreshRemoteInBackground({mountIfNeeded:false});
+  } catch (e) {
+    console.error('[WVAuth] authenticated boot failed', e);
+    renderAuthError(e.message || 'Unable to load your workspace.');
+  }
 };
 
-async function ensureSeededLocalFirst() {
-  const overlay = document.getElementById('boot-overlay');
-  // Prefer the bundled dataset for deterministic, instant startup.
-  const seeded = await db.isSeeded();
-  if (!seeded) {
-    const label = document.getElementById('boot-label');
-    const bar = document.getElementById('boot-bar');
-    await db.seedFromBundle(window.SEED_DATA, (step, total, msg) => {
-      if (label) label.textContent = msg;
-      if (bar) bar.style.width = Math.round((step / total) * 100) + '%';
-    });
-  }
-  if (overlay) overlay.remove();
-
-  // Live Sheets refresh is authenticated and intentionally happens in the
-  // background. The local snapshot always renders first.
-  setTimeout(() => {
-    if (window.WVAuth?.getCredential?.()) refreshRemoteInBackground();
-  }, 0);
-}
-
-async function refreshRemoteInBackground() {
+async function refreshRemoteInBackground(options = {}) {
+  const {mountIfNeeded=false} = options;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 12000);
+  const timer = setTimeout(() => controller.abort(), 20000);
   try {
     const credential = window.WVAuth?.getCredential?.() || '';
-    if (!credential) return;
+    if (!credential) return false;
     const res = await fetch('/.netlify/functions/fam-data', { cache: 'no-store', signal: controller.signal, headers: { Authorization: `Bearer ${credential}` } });
     const payload = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(payload.error || `Remote sync failed (${res.status})`);
-    if (!payload || !Array.isArray(payload.vendorMatrixRecords)) throw new Error('Remote sync returned an invalid dashboard dataset.');
-    const before = window.SEED_DATA?.meta?.generatedAt || '';
-    await db.replaceFromRemoteBundle(payload);
-    window.SEED_DATA = payload;
-    console.info('Live Google Sheets sync complete:', payload.meta);
-    // Refresh the current route once when a newer remote dataset arrives.
-    const after = payload.meta?.generatedAt || '';
-    if (after && after !== before && sessionStorage.getItem('wv_remote_refresh') !== after) {
-      sessionStorage.setItem('wv_remote_refresh', after);
-      location.reload();
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) { try { await window.WVAuth?.signOut?.(); } catch (_) {} return false; }
+      throw new Error(payload.error || `Remote sync failed (${res.status})`);
     }
+    if (!payload || !Array.isArray(payload.vendorMatrixRecords)) throw new Error('Remote sync returned an invalid dashboard dataset.');
+    await db.replaceFromRemoteBundle(payload);
+    window.SEED_DATA = { meta: payload.meta || { remote:true, generatedAt:new Date().toISOString() }, categories: payload.categories || [] };
+    console.info('Live Google Sheets sync complete:', payload.meta);
+    if (mountIfNeeded || !document.getElementById('page-root')) {
+      AppState.currentUser = {...(window.WVAuth?.user || AppState.currentUser), role: isAdminUser() ? 'Admin' : 'Member'};
+      renderShell();
+      if (window.WVAuth) WVAuth.init();
+      setupGlobalSearch();
+      handleRoute();
+    } else {
+      SEARCH_INDEX = null;
+      const route = AppState.route;
+      if (route) handleRoute();
+    }
+    return true;
   } catch (err) {
-    console.warn('Live Google Sheets sync unavailable; continuing with local snapshot.', err);
+    console.warn('Live Google Sheets sync unavailable.', err);
+    if (mountIfNeeded) renderAuthError(err.message || 'The secure data service could not be reached.');
+    return false;
   } finally {
     clearTimeout(timer);
   }
 }
-window.__wvRefreshRemoteData = refreshRemoteInBackground;
-
-// Backward-compatible helper used by any older code paths.
-async function ensureSeeded() {
-  return ensureSeededLocalFirst();
-}
+window.__wvRefreshRemoteData = () => refreshRemoteInBackground({mountIfNeeded:!document.getElementById('page-root')});
 
 /** ================= Brand icon system ================= */
 function wvIcon(name, size = 18) {
@@ -158,6 +195,8 @@ function wvIcon(name, size = 18) {
     moon: '<path d="M20.5 15.5A8.5 8.5 0 0 1 8.5 3.5 8.5 8.5 0 1 0 20.5 15.5Z"/>',
     bell: '<path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4"/>',
     vendor: '<path d="M4 21v-9l8-6 8 6v9"/><path d="M8 21v-5h8v5M3 10l9-7 9 7"/>',
+    user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+    lock: '<rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
   };
   const body = paths[name] || paths.dashboard;
   return `<svg class="wv-icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
@@ -179,7 +218,7 @@ function renderShell() {
         ${NAV_SECTIONS.map(sec => `
           <div class="nav-section-title">${sec.title}</div>
           <ul class="nav-list">
-            ${sec.items.map(item => `
+            ${sec.items.filter(item => !item.adminOnly || isAdminUser()).map(item => `
               <li class="nav-item">
                 <a class="nav-link" href="#/${item.id}" data-route="${item.id}" title="${item.label}">
                   <span class="nav-icon">${wvIcon(item.icon)}</span>
@@ -204,6 +243,7 @@ function renderShell() {
         </div>
         <div class="topbar-actions">
           <div id="google-user" class="google-user-area"></div>
+          <button class="icon-btn profile-top-btn" id="profile-top-btn" title="My Profile" aria-label="My Profile">${AppState.currentUser?.picture ? `<img src="${escapeHtml(AppState.currentUser.picture)}" alt="" onerror="this.style.display='none'">` : wvIcon('user')}</button>
           <button class="icon-btn" id="theme-toggle-btn" title="Toggle theme" aria-label="Toggle theme">${wvIcon(AppState.theme === 'dark' ? 'sun' : 'moon')}</button>
           <button class="icon-btn topbar-popover-trigger" id="frequent-vendors-btn" title="Regular vendor contacts" aria-label="Regular vendor contacts" aria-expanded="false">${wvIcon('phone')}<span class="topbar-badge" id="frequent-vendors-count">0</span></button>
           <button class="icon-btn" id="notif-btn" title="Activity" aria-label="Activity">${wvIcon('bell')}</button>
@@ -212,7 +252,7 @@ function renderShell() {
       <main class="content" id="page-root"></main>
     </div>
     <nav class="bottom-nav" id="bottom-nav">
-      ${[['overview','dashboard'],['vendors','tag'],['solutions','diamond'],['referencing','link'],['admin','settings']].map(([id,icon]) => `
+      ${[['overview','dashboard'],['vendors','tag'],['solutions','diamond'],['personal','user'],...(isAdminUser()?[['admin','settings']]:[])].map(([id,icon]) => `
         <a href="#/${id}" data-route="${id}"><span class="bn-icon">${wvIcon(icon)}</span><span>${PAGE_TITLES[id]}</span></a>
       `).join('')}
     </nav>
@@ -231,6 +271,7 @@ function renderShell() {
     document.getElementById('theme-toggle-btn').innerHTML = wvIcon(AppState.theme === 'dark' ? 'sun' : 'moon');
   };
   document.getElementById('notif-btn').onclick = showActivityPanel;
+  document.getElementById('profile-top-btn').onclick = () => navigate('personal');
   document.getElementById('frequent-vendors-btn').onclick = toggleFrequentVendorsPanel;
   updateFrequentVendorsCount();
   const mobileBtn = document.getElementById('mobile-nav-btn');
@@ -254,8 +295,13 @@ function handleRoute() {
   const hash = location.hash.replace(/^#\//, '') || 'overview';
   const [path, queryString = ''] = hash.split('?');
   const [route, ...rest] = path.split('/');
-  AppState.route = PAGE_RENDERERS[route] ? route : 'overview';
-  AppState.routeParams = { sub: rest.join('/'), query: new URLSearchParams(queryString) };
+  if ((route === 'admin' || route === 'trash') && !isAdminUser()) {
+    AppState.route = 'personal';
+    AppState.routeParams = { sub:'', query:new URLSearchParams() };
+  } else {
+    AppState.route = PAGE_RENDERERS[route] ? route : 'overview';
+    AppState.routeParams = { sub: rest.join('/'), query: new URLSearchParams(queryString) };
+  }
   updateActiveNav();
   document.getElementById('sidebar')?.classList.remove('mobile-open');
   document.getElementById('sidebar-scrim')?.classList.remove('show');

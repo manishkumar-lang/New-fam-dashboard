@@ -10,7 +10,7 @@ exports.handler = async (event) => {
     body: JSON.stringify({
       ok: true,
       service: 'wellversed-fam-netlify-functions',
-      functions: ['health','fam-data'],
+      functions: ['health','fam-data','personal-data'],
       configured: {
         sheetId: !!process.env.GOOGLE_SHEET_ID,
         serviceAccountEmail: !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,

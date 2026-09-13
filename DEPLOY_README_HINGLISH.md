@@ -1,51 +1,43 @@
-# Wellversed FAM Dashboard — Fresh Deployment
+# Wellversed FAM — Secure Deployment (Hinglish)
 
-This package is prepared for a **new Netlify project connected to GitHub**.
+## Ab dashboard ka behaviour
+1. Login ke bina **koi dashboard data render nahi hoga**.
+2. Google se verified `@wellversed.in` account login hone ke baad server live Google Sheets se shared FAM data fetch karega.
+3. **Overview ka existing layout/count logic same rakha gaya hai**; data ab authenticated live backend se aata hai.
+4. Top-right profile icon se **My Workspace** open hoga.
+5. My Workspace mein har user apni Google Sheet URL/ID connect kar sakta hai.
+6. Personal sheet ko service account email ke saath **Viewer** share karna zaroori hai. Service account email UI mein automatically dikh jayega.
+7. Personal connections email ke saath isolate hain; ek user doosre user ki connection/data nahi dekh sakta.
+8. Personal data open page par har 2 minute auto-refresh hota hai aur **Refresh now** button bhi hai.
+9. Admin/Trash sirf `manish.kumar@wellversed.in` ke liye visible hai.
 
-## Repository structure
-
-- `site/` — static dashboard (Netlify publish directory)
-- `netlify/functions/health.js` — deployment/health check
-- `netlify/functions/fam-data.js` — authenticated Google Sheets sync
-- `netlify.toml` — Netlify build + functions configuration
-
-Netlify must use `site` as the Publish directory and `netlify/functions` as the Functions directory. The functions directory is intentionally outside the publish directory.
-
-## Required Netlify environment variables
-
-Set these in Netlify UI. **Never commit the service-account private key to GitHub.**
-
+## Netlify variables
+Existing variables ko preserve rakho:
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL`
 - `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY`
 - `GOOGLE_SHEET_ID`
-- `GOOGLE_KNO_SHEET_ID` (optional; the verified FAM KNO Sheet ID is already the fallback)
-- `GOOGLE_CLIENT_ID` (optional; the package contains the verified public OAuth client ID as a fallback)
-- `GOOGLE_ALLOWED_DOMAIN` (optional; defaults to `wellversed.in`)
+- `GOOGLE_KNO_SHEET_ID`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_ALLOWED_DOMAIN`
 
-## Google OAuth
+Optional:
+- `GOOGLE_ADMIN_EMAIL=manish.kumar@wellversed.in`
 
-The browser Client ID is:
-
+## Production OAuth Client
 `255689281984-2t3k3fe19srh84tnjqk3um3psfda58ie.apps.googleusercontent.com`
 
-After the new Netlify site has its final URL, add that exact `https://...netlify.app` URL under **Authorized JavaScript origins** for this Web OAuth client. Do not add a path or trailing slash.
+Google Cloud → Google Auth Platform → Clients → Web application:
+- Authorized JavaScript origin: `https://wellversed-fam-dashboard-new.netlify.app`
+- Local origin (optional): `http://localhost:3000`
 
-## Deployment verification order
+## Personal Google Sheet flow
+- Login → My Workspace → Paste Google Sheet URL → Add Sheet.
+- Backend pehle sheet access test karega; access na ho to connection save nahi hogi.
+- Sheet ko service account ke saath Viewer share karo.
+- Connected sheet ka data sirf usi Google email ko return hota hai jisne connection add kiya.
 
-1. Deploy from GitHub through Netlify.
-2. Open `https://YOUR-SITE/.netlify/functions/health`.
-3. Confirm the JSON says `ok: true` and both functions are listed.
-4. Open the dashboard. It should render from the bundled snapshot immediately.
-5. Sign in with Google.
-6. After sign-in, the dashboard requests live Sheets data in the background.
-7. If live sync fails, the local snapshot remains available; the UI does not freeze.
-
-## Performance design
-
-- Immediate in-memory snapshot for first paint.
-- IndexedDB persistence is opened in the background and never gates startup.
-- localStorage is only a fallback.
-- Vendor aggregation uses `Map`/`Set` for near-linear O(n) processing.
-- Google Sheets reads use `values:batchGet` in chunks rather than one HTTP request per sheet.
-- Backend source processing uses bounded concurrency to reduce total sync time without flooding the Sheets API.
-- Live data is fetched only after Google sign-in because the backend validates the Google ID token.
+## Security
+- Public client bundle mein dashboard snapshot nahi hai.
+- Sign-out par browser-side dashboard cache clear hota hai.
+- Account switch par persisted data isolate/clear hota hai.
+- Private key GitHub mein kabhi upload mat karo.

@@ -1,51 +1,36 @@
-# Wellversed FAM Dashboard — Fresh Deployment
+# Wellversed FAM Intelligence — Secure Production Build
 
-This package is prepared for a **new Netlify project connected to GitHub**.
+Privacy-first Netlify deployment for the Wellversed FAM dashboard.
 
-## Repository structure
+## Architecture
+- No vendor, employee, pricing, or dashboard snapshot is bundled in the public browser build.
+- The dashboard shows no data until a verified Google Workspace login succeeds.
+- Live shared FAM data is fetched server-side from Google Sheets after authentication.
+- Personal Google Sheets can be connected from **My Workspace**. Each connection is stored against the signed-in email and is only returned to that same account.
+- Personal sheets must be shared with the Wellversed service account as **Viewer** so the secure backend can read them.
+- My Workspace refreshes its connected sheets automatically every 2 minutes while open.
+- Admin and Trash are restricted to `manish.kumar@wellversed.in` in the UI; the live backend also returns an admin permission flag for the verified identity.
 
-- `site/` — static dashboard (Netlify publish directory)
-- `netlify/functions/health.js` — deployment/health check
-- `netlify/functions/fam-data.js` — authenticated Google Sheets sync
-- `netlify.toml` — Netlify build + functions configuration
+## Netlify
+Publish directory: `site`
+Functions directory: `netlify/functions`
 
-Netlify must use `site` as the Publish directory and `netlify/functions` as the Functions directory. The functions directory is intentionally outside the publish directory.
-
-## Required Netlify environment variables
-
-Set these in Netlify UI. **Never commit the service-account private key to GitHub.**
-
+Required environment variables:
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL`
 - `GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY`
 - `GOOGLE_SHEET_ID`
-- `GOOGLE_KNO_SHEET_ID` (optional; the verified FAM KNO Sheet ID is already the fallback)
-- `GOOGLE_CLIENT_ID` (optional; the package contains the verified public OAuth client ID as a fallback)
-- `GOOGLE_ALLOWED_DOMAIN` (optional; defaults to `wellversed.in`)
+- `GOOGLE_KNO_SHEET_ID`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_ALLOWED_DOMAIN`
 
-## Google OAuth
+Optional:
+- `GOOGLE_ADMIN_EMAIL` (defaults to `manish.kumar@wellversed.in`)
 
-The browser Client ID is:
-
+## OAuth
+Production Web Client ID:
 `255689281984-2t3k3fe19srh84tnjqk3um3psfda58ie.apps.googleusercontent.com`
 
-After the new Netlify site has its final URL, add that exact `https://...netlify.app` URL under **Authorized JavaScript origins** for this Web OAuth client. Do not add a path or trailing slash.
+Authorized JavaScript origin:
+`https://wellversed-fam-dashboard-new.netlify.app`
 
-## Deployment verification order
-
-1. Deploy from GitHub through Netlify.
-2. Open `https://YOUR-SITE/.netlify/functions/health`.
-3. Confirm the JSON says `ok: true` and both functions are listed.
-4. Open the dashboard. It should render from the bundled snapshot immediately.
-5. Sign in with Google.
-6. After sign-in, the dashboard requests live Sheets data in the background.
-7. If live sync fails, the local snapshot remains available; the UI does not freeze.
-
-## Performance design
-
-- Immediate in-memory snapshot for first paint.
-- IndexedDB persistence is opened in the background and never gates startup.
-- localStorage is only a fallback.
-- Vendor aggregation uses `Map`/`Set` for near-linear O(n) processing.
-- Google Sheets reads use `values:batchGet` in chunks rather than one HTTP request per sheet.
-- Backend source processing uses bounded concurrency to reduce total sync time without flooding the Sheets API.
-- Live data is fetched only after Google sign-in because the backend validates the Google ID token.
+Do not commit service-account private keys or client secrets.

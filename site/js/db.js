@@ -2,10 +2,11 @@
  * Wellversed FAM DataService
  *
  * Fast-start architecture:
- * 1) Dashboard data is hydrated into memory immediately from SEED_DATA.
- * 2) IndexedDB is opened/persisted in the background and never blocks first paint.
- * 3) localStorage is used only as a persistence fallback.
- * 4) Remote Google Sheets data replaces the in-memory snapshot in the background.
+ * Privacy-first architecture:
+ * 1) Dashboard data is not rendered or activated until a verified Google user is present.
+ * 2) IndexedDB/localStorage opens only after a verified Google user is activated.
+ * 3) Persisted data is namespaced to the signed-in email and cleared on account changes.
+ * 4) Live Google Sheets data is fetched server-side after authentication.
  *
  * This prevents a browser/enterprise policy issue with IndexedDB from freezing
  * the entire dashboard at "Loading source data…".
@@ -54,13 +55,44 @@ class DataService {
     this.ready = Promise.resolve();
     this.persistenceReady = Promise.resolve(false);
     this._localSaveTimer = null;
+    this.currentUserEmail = '';
+    this.userActivated = false;
+    this.persistenceStarted = false;
+    // Privacy-first: bundled baseline data is never hydrated before a verified
+    // Google user is activated. Persistence is opened only after login.
+  }
 
-    // The bundled snapshot is the fastest and most reliable first-boot source.
-    // data-bundle.js is loaded before db.js in index.html.
-    this._hydrateBundle(window.SEED_DATA);
+  async activateForUser(email) {
+    const normalized = String(email || '').trim().toLowerCase();
+    if (!normalized) throw new Error('A verified Google account is required.');
+    if (this.userActivated && this.currentUserEmail === normalized) return true;
+    this.currentUserEmail = normalized;
+    this.userActivated = true;
+    this.memory = emptyStores();
+    this.local = emptyStores();
+    if (!this.persistenceStarted) {
+      this.persistenceStarted = true;
+      await this._openPersistence(normalized);
+    } else if (this.db || this.mode === 'local') {
+      const owner = this.mode === 'idb' ? await this._idbGet('settings', 'owner') : this._getLocalOwner();
+      if (owner?.email !== normalized) await this.clearSessionData(false);
+    }
+    return true;
+  }
 
-    // Persistence is deliberately detached from boot.
-    setTimeout(() => this._openPersistence(), 0);
+  _getLocalOwner() {
+    try { return JSON.parse(localStorage.getItem(DB_NAME + '_owner') || 'null'); } catch (_) { return null; }
+  }
+
+  async clearSessionData(resetOwner = true) {
+    this.memory = emptyStores();
+    if (this.mode === 'idb' && this.db) {
+      await Promise.all(STORES.map(s => this._idbClear(s)));
+      if (resetOwner) await this._idbPut('settings', { id:'owner', email:this.currentUserEmail || '' });
+    } else if (this.mode === 'local') {
+      try { localStorage.removeItem(DB_NAME + '_data'); if (resetOwner) localStorage.setItem(DB_NAME + '_owner', JSON.stringify({email:this.currentUserEmail || ''})); } catch (_) {}
+    }
+    this.memory.settings = resetOwner ? [{id:'owner',email:this.currentUserEmail || ''}] : [];
   }
 
   _hydrateBundle(bundle) {
@@ -96,10 +128,10 @@ class DataService {
     }];
   }
 
-  async _openPersistence() {
+  async _openPersistence(userEmail = this.currentUserEmail) {
     // file:// and restricted profiles should not block the dashboard.
     if (!window.indexedDB || location.protocol === 'file:') {
-      this._activateLocalFallback();
+      this._activateLocalFallback(userEmail);
       return;
     }
 
@@ -113,7 +145,7 @@ class DataService {
       };
       const timer = setTimeout(() => {
         console.warn('[DataService] IndexedDB startup timed out; using local persistence fallback.');
-        this._activateLocalFallback();
+        this._activateLocalFallback(userEmail);
         done(false);
       }, 1800);
 
@@ -127,12 +159,12 @@ class DataService {
         };
         req.onerror = () => {
           console.warn('[DataService] IndexedDB unavailable; using local persistence fallback.');
-          this._activateLocalFallback();
+          this._activateLocalFallback(userEmail);
           done(false);
         };
         req.onblocked = () => {
           console.warn('[DataService] IndexedDB blocked; using local persistence fallback.');
-          this._activateLocalFallback();
+          this._activateLocalFallback(userEmail);
           done(false);
         };
         req.onsuccess = async e => {
@@ -140,43 +172,55 @@ class DataService {
           this.db.onversionchange = () => this.db.close();
           this.mode = 'idb';
           try {
-            const persistedSeed = await this._idbGet('settings', 'seedStatus');
-            if (persistedSeed?.seeded) {
+            const owner = await this._idbGet('settings', 'owner');
+            if (owner?.email === userEmail) {
               const loaded = await Promise.all(STORES.map(s => this._idbGetAll(s)));
               STORES.forEach((s, i) => { this.memory[s] = loaded[i]; });
-              if (!this.memory.vendorMatrix.length && window.SEED_DATA) this._hydrateBundle(window.SEED_DATA);
             } else {
-              await this._persistAllIdb();
+              await Promise.all(STORES.map(s => this._idbClear(s)));
+              this.memory = emptyStores();
+              await this._idbPut('settings', { id:'owner', email:userEmail });
             }
+            this.memory.settings = this.memory.settings.filter(x => x.id !== 'owner');
+            this.memory.settings.push({ id:'owner', email:userEmail });
           } catch (err) {
-            console.warn('[DataService] Background IndexedDB hydrate failed; keeping memory snapshot.', err);
+            console.warn('[DataService] Secure IndexedDB user hydrate failed; starting empty.', err);
+            this.memory = emptyStores();
+            await Promise.all(STORES.map(s => this._idbClear(s)));
+            await this._idbPut('settings', { id:'owner', email:userEmail });
           }
           done(true);
         };
       } catch (err) {
         console.warn('[DataService] IndexedDB exception; using local persistence fallback.', err);
-        this._activateLocalFallback();
+        this._activateLocalFallback(userEmail);
         done(false);
       }
     });
   }
 
-  _activateLocalFallback() {
+  _activateLocalFallback(userEmail = this.currentUserEmail) {
     this.mode = 'local';
     try {
-      const raw = localStorage.getItem(DB_NAME + '_data');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const hasSeed = Array.isArray(parsed.vendorMatrix) && parsed.vendorMatrix.length;
-        if (hasSeed) {
+      const owner = this._getLocalOwner();
+      if (owner?.email === userEmail) {
+        const raw = localStorage.getItem(DB_NAME + '_data');
+        if (raw) {
+          const parsed = JSON.parse(raw);
           STORES.forEach(s => { if (Array.isArray(parsed[s])) this.memory[s] = parsed[s]; });
         }
+      } else {
+        localStorage.removeItem(DB_NAME + '_data');
       }
+      localStorage.setItem(DB_NAME + '_owner', JSON.stringify({email:userEmail}));
+      this.memory.settings = this.memory.settings.filter(x => x.id !== 'owner');
+      this.memory.settings.push({ id:'owner', email:userEmail });
       this.local = this.memory;
       this._saveLocal();
     } catch (e) {
       console.warn('[DataService] localStorage unavailable; memory-only mode.', e);
       this.mode = 'memory';
+      this.memory = emptyStores();
     }
   }
 
@@ -357,7 +401,9 @@ class DataService {
       categories: categoryRows(bundle.categories || []),
     };
     Object.entries(updates).forEach(([store, rows]) => { this.memory[store] = rows.slice(); });
-    this.memory.settings = [{ id: 'seedStatus', seeded: true, seededAt: new Date().toISOString(), meta: bundle.meta, remote: true }];
+    this.memory.settings = this.memory.settings.filter(x => x.id !== 'seedStatus');
+    this.memory.settings.push({ id: 'seedStatus', seeded: true, seededAt: new Date().toISOString(), meta: bundle.meta, remote: true });
+    if (this.currentUserEmail && !this.memory.settings.some(x => x.id === 'owner')) this.memory.settings.push({ id:'owner', email:this.currentUserEmail });
 
     // Persist remotely-fetched state in the background; UI does not wait for storage.
     if (this.mode === 'local') this._saveLocal();
@@ -383,11 +429,10 @@ class DataService {
   async isSeeded() { return !!this.memory.settings.find(x => x.id === 'seedStatus' && x.seeded); }
 
   async seedFromBundle(bundle) {
-    this._hydrateBundle(bundle);
-    if (this.mode === 'local') this._saveLocal();
-    else this.persistenceReady.then(ok => ok && this._persistAllIdb());
-    return true;
+    if (!this.userActivated) throw new Error('Login required before data can be loaded.');
+    return this.replaceFromRemoteBundle(bundle);
   }
 }
 
 const db = new DataService();
+window.db = db;

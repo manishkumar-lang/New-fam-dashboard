@@ -31,12 +31,19 @@ window.WVAuth = {
     }
     this.restore();
     this.renderUser();
+    // If a user is already signed in, a page reload must also trigger the
+    // authenticated Sheets sync. Do this after restore so the credential is
+    // available; this avoids the boot/auth race where no fam-data request
+    // was made after refresh.
+    if (this.getCredential()) {
+      setTimeout(() => window.__wvOnAuthenticated?.(this.user), 0);
+    }
     return true;
   },
 
   renderButton() {
     if (!window.google?.accounts?.id) return;
-    const host = document.getElementById('google-signin');
+    const host = document.getElementById('login-google-signin') || document.getElementById('google-signin');
     if (!host || this._buttonHost === host) return;
     host.innerHTML = '';
     try {
@@ -66,7 +73,7 @@ window.WVAuth = {
       this.renderUser();
       if (typeof toast === 'function') toast(`Signed in as ${this.user.name}`, 'success');
       // Live Sheets is authenticated server-side; fetch it only after login.
-      setTimeout(() => window.__wvRefreshRemoteData?.(), 0);
+      setTimeout(() => window.__wvOnAuthenticated?.(this.user), 0);
     } catch (e) {
       console.error('[WVAuth] Credential handling failed', e);
     }
@@ -80,16 +87,20 @@ window.WVAuth = {
 
   getCredential() { return sessionStorage.getItem('wv_google_credential') || ''; },
 
-  signOut() {
+  async signOut() {
     if (window.google?.accounts?.id) google.accounts.id.disableAutoSelect();
     sessionStorage.removeItem('wv_google_user');
     sessionStorage.removeItem('wv_google_credential');
     this.user = null;
     this._buttonHost = null;
-    this.renderUser();
+    try { await window.db?.clearSessionData?.(false); } catch (_) {}
+    if (typeof window.__wvShowLoginGate === 'function') window.__wvShowLoginGate();
+    else this.renderUser();
   },
 
   renderUser() {
+    const loginHost = document.getElementById('login-google-signin');
+    if (loginHost && !this.user) { this._buttonHost = null; this.renderButton(); return; }
     const host = document.getElementById('google-user');
     if (!host) return;
     if (!this.user) {

@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const MAIN_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 // Exact KNO source identified from the user's FAM Index workbook.
 const KNO_SHEET_ID = process.env.GOOGLE_KNO_SHEET_ID || '1ZcEVFG7FYZzYfipo53QUyuk8F_fSWRDQBn0WDtqxbjs';
+const ADMIN_EMAIL = (process.env.GOOGLE_ADMIN_EMAIL || 'manish.kumar@wellversed.in').toLowerCase();
 
 // Matrix source IDs from the supplied FAM Index workbook. These are a safety
 // fallback if Google Sheets does not expose rich-text hyperlink metadata through
@@ -199,7 +200,7 @@ exports.handler=async(event)=>{
     }
     const vendors=[...vi.values()].map(x=>({id:x.id,vendorName:x.vendorName,categories:[...x.categories].sort(),productLines:[...x.productLines].sort(),phones:[...x.phones].sort(),locations:[...x.locations].sort(),recordIds:x.recordIds,recordCount:x.recordIds.length})).sort((a,b)=>a.vendorName.localeCompare(b.vendorName));
     const categories=[...new Set(vm.map(x=>x.category))].sort(),now=new Date().toISOString();
-    const bundle={meta:{generatedAt:now,sourceFiles:['Google Sheets live source'],vendorWorkbookSheetCount:v.meta.length,knoWorkbookSheetCount:k.meta.length,vendorMatrixRecordCount:vm.length,solutionMatrixRecordCount:sm.length,distinctVendorCount:vendors.length,categoryCount:categories.length,knowledgeBaseDocCount:k.docs.length,referenceDocCount:v.refs.length,employeeCount:k.employees.length,sourceSpreadsheetCount:sources.length,remote:true,signedInAs:identity.email,sourceWarnings:[...v.meta.filter(x=>x.error||x.warning),...(k.error?[{sourceId:KNO_SHEET_ID,error:k.error}]:[])]},categories,vendors,vendorMatrixRecords:vm,solutionMatrixRecords:sm,vendorSheetsMeta:v.meta,knoSheetsMeta:k.meta,employees:k.employees,knowledgeBaseDocs:k.docs,referenceDocs:v.refs,categoryMappingReference:{id:id('remote-index'),title:'FAM Google Sheets Index',docType:'category_mapping_reference',tabs:sources,source:{spreadsheetId:MAIN_SHEET_ID}}};
+    const bundle={meta:{generatedAt:now,sourceFiles:['Google Sheets live source'],vendorWorkbookSheetCount:v.meta.length,knoWorkbookSheetCount:k.meta.length,vendorMatrixRecordCount:vm.length,solutionMatrixRecordCount:sm.length,distinctVendorCount:vendors.length,categoryCount:categories.length,knowledgeBaseDocCount:k.docs.length,referenceDocCount:v.refs.length,employeeCount:k.employees.length,sourceSpreadsheetCount:sources.length,remote:true,signedInAs:identity.email,sourceWarnings:[...v.meta.filter(x=>x.error||x.warning),...(k.error?[{sourceId:KNO_SHEET_ID,error:k.error}]:[])]},permissions:{admin:String(identity.email).toLowerCase()===ADMIN_EMAIL},categories,vendors,vendorMatrixRecords:vm,solutionMatrixRecords:sm,vendorSheetsMeta:v.meta,knoSheetsMeta:k.meta,employees:k.employees,knowledgeBaseDocs:k.docs,referenceDocs:v.refs,categoryMappingReference:{id:id('remote-index'),title:'FAM Google Sheets Index',docType:'category_mapping_reference',tabs:sources,source:{spreadsheetId:MAIN_SHEET_ID}}};
     return{statusCode:200,headers,body:JSON.stringify(bundle)};
   }catch(e){
     console.error('[fam-data]',e);

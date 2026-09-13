@@ -7,8 +7,7 @@ PAGE_RENDERERS.contacts = async function (root) {
 
 async function renderVendorContacts(root) {
   const records = (await db.getAll('vendorMatrix')).filter(r => !r.deletedAt);
-  const imported = await loadImportedVendorContacts();
-  const contacts = mergeVendorContacts(dedupeVendorContacts(records), imported);
+  const contacts = dedupeVendorContacts(records);
   const categories = [...new Set(contacts.map(r => r.category).filter(Boolean))].sort();
   const q = VendorContactsState.search.toLowerCase().trim();
   const filtered = contacts.filter(r => {
@@ -79,30 +78,6 @@ function updateVendorContactsResults(root, contacts) {
     });
   }
   bindPagination(list, VendorContactsState, () => renderVendorContacts(root));
-}
-
-async function loadImportedVendorContacts() {
-  try {
-    const response = await fetch('assets/vendor-contacts-import.json?v=20260911');
-    if (!response.ok) return [];
-    const payload = await response.json();
-    return (payload.records || []).map(r => ({ ...r, sourceRecordId: '' }));
-  } catch (err) {
-    console.warn('Imported vendor contacts could not be loaded:', err);
-    return [];
-  }
-}
-
-function mergeVendorContacts(existing, imported) {
-  const output = [...existing];
-  const keys = new Set(output.map(contactKey));
-  imported.forEach(contact => {
-    const key = contactKey(contact);
-    if (keys.has(key)) return;
-    keys.add(key);
-    output.push(contact);
-  });
-  return output;
 }
 
 function contactKey(contact) {

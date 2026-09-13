@@ -1,4 +1,6 @@
 PAGE_RENDERERS.admin = async function (root) {
+  if (!isAdminUser()) { navigate('personal'); return; }
+
   root.innerHTML = `
     <div class="section-head">
       <div><h2>Admin</h2><div class="section-sub">Configure dashboard content, manage data, and review activity — changes apply immediately, no code required</div></div>

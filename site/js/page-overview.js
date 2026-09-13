@@ -121,12 +121,11 @@ PAGE_RENDERERS.overview = async function (root) {
     <div class="panel" style="margin-top:16px; display:${widgets.provenance ? '' : 'none'}">
       <div class="panel-title">Data provenance</div>
       <p class="muted" style="font-size:12.5px; line-height:1.7;">
-        This entire application is seeded from three source files: <b>DWSE Vendor Matrix | WELLVERSED.xlsx</b> (${window.SEED_DATA.meta.vendorWorkbookSheetCount} sheets),
-        <b>D-WSE KNO Sheet - Batch-I | Wellversed.xlsx</b> (${window.SEED_DATA.meta.knoWorkbookSheetCount} sheets), and <b>VENDOR MATRIX LINK.docx</b> (category mapping reference).
+        This overview is computed from the authenticated Wellversed Google Sheets source and refreshed from the live backend. Every displayed record retains its source sheet and row lineage where available.
         No vendor, price, GST figure, or rating on this dashboard was invented — every number traces back to a specific sheet and row, viewable from any record's "Source &amp; Lineage" tab.
         Categories marked "inferred" were assigned from the sheet's own title (not fabricated); categories marked "confirmed" are drawn directly from the Vendor Matrix Link document.
       </p>
-      ${window.SEED_DATA.meta.mergeNote ? `<p class="muted" style="font-size:12.5px; margin-top:10px; padding-top:10px; border-top:1px dashed var(--line);"><b>Merge note:</b> ${escapeHtml(window.SEED_DATA.meta.mergeNote)}</p>` : ''}
+      
     </div>
   `;
 
