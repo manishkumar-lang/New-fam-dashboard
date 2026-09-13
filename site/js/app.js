@@ -337,6 +337,12 @@ function handleRoute() {
 
 function navigate(route) { location.hash = '#/' + route; }
 
+// Hash navigation must re-render the page when a sidebar/bottom-nav link is
+// clicked. Without this listener, the URL changes but the current page stays
+// mounted. Keep routing centralized in handleRoute() so direct URLs and
+// in-app navigation behave identically.
+window.addEventListener('hashchange', handleRoute);
+
 /** ================= Global search ================= */
 let SEARCH_INDEX = null;
 
