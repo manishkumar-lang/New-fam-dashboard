@@ -41,6 +41,13 @@ const PAGE_TITLES = {
 };
 
 /** ================= Boot ================= */
+function hideBootOverlay() {
+  const overlay = document.getElementById('boot-overlay');
+  if (!overlay) return;
+  overlay.style.display = 'none';
+  overlay.setAttribute('aria-hidden', 'true');
+}
+
 async function boot() {
   document.documentElement.setAttribute('data-theme', AppState.theme);
   // Privacy-first boot: never seed or render dashboard data before a verified
@@ -80,6 +87,7 @@ function isAdminUser() {
 }
 
 function renderLoginGate() {
+  hideBootOverlay();
   const app = document.getElementById('app');
   if (!app) return;
   app.innerHTML = `<div class="login-screen">
@@ -106,6 +114,7 @@ function renderAuthLoading(title, message) {
 }
 
 function renderAuthError(message) {
+  hideBootOverlay();
   const app = document.getElementById('app');
   if (!app) return;
   app.innerHTML = `<div class="login-screen"><div class="login-card">
@@ -204,6 +213,7 @@ function wvIcon(name, size = 18) {
 
 /** ================= Shell ================= */
 function renderShell() {
+  hideBootOverlay();
   const app = document.getElementById('app');
   app.classList.toggle('sidebar-collapsed', AppState.sidebarCollapsed);
   app.innerHTML = `
