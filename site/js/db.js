@@ -168,6 +168,13 @@ class DataService {
           done(false);
         };
         req.onsuccess = async e => {
+          // The startup timeout may already have switched the app to the local
+          // fallback. In that case close the late IndexedDB handle instead of
+          // allowing a second persistence mode to race with the fallback.
+          if (settled) {
+            try { e.target.result.close(); } catch (_) {}
+            return;
+          }
           this.db = e.target.result;
           this.db.onversionchange = () => this.db.close();
           this.mode = 'idb';

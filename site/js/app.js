@@ -41,6 +41,10 @@ const PAGE_TITLES = {
 };
 
 /** ================= Boot ================= */
+let AUTH_BOOT_PROMISE = null;
+let AUTH_BOOT_EMAIL = '';
+let REMOTE_SYNC_PROMISE = null;
+
 function hideBootOverlay() {
   const overlay = document.getElementById('boot-overlay');
   if (!overlay) return;
@@ -48,11 +52,32 @@ function hideBootOverlay() {
   overlay.setAttribute('aria-hidden', 'true');
 }
 
+async function startAuthenticatedApp(user) {
+  const email = String(user?.email || '').trim().toLowerCase();
+  if (!email) throw new Error('A verified Google account is required.');
+  if (AUTH_BOOT_PROMISE && AUTH_BOOT_EMAIL === email) return AUTH_BOOT_PROMISE;
+  AUTH_BOOT_EMAIL = email;
+  AUTH_BOOT_PROMISE = (async () => {
+    await db.activateForUser(email);
+    AppState.currentUser = {...user, role: isAdminUser() ? 'Admin' : 'Member'};
+    renderShell();
+    if (window.WVAuth) WVAuth.init();
+    setupGlobalSearch();
+    handleRoute();
+    // One deduplicated live refresh per signed-in session. Backend cache and
+    // this client-side in-flight guard together prevent request storms.
+    void refreshRemoteInBackground({mountIfNeeded:false});
+    return true;
+  })().catch(err => {
+    AUTH_BOOT_PROMISE = null;
+    AUTH_BOOT_EMAIL = '';
+    throw err;
+  });
+  return AUTH_BOOT_PROMISE;
+}
+
 async function boot() {
   document.documentElement.setAttribute('data-theme', AppState.theme);
-  // Privacy-first boot: never seed or render dashboard data before a verified
-  // Google account is present. The public site contains code only; live data is
-  // fetched server-side after authentication.
   try {
     if (window.WVAuth) WVAuth.init();
     const user = window.WVAuth?.user;
@@ -61,27 +86,13 @@ async function boot() {
       renderLoginGate();
       return;
     }
-    await db.activateForUser(user.email);
-    // Keep the existing dashboard baseline, but do not hydrate/render it until
-    // a verified Google account is present. This gives an immediate dashboard
-    // after login while the authenticated Sheets sync runs in the background.
-    if (window.SEED_DATA && Array.isArray(window.SEED_DATA.vendorMatrixRecords)) {
-      await db.seedFromBundle(window.SEED_DATA);
-    }
-    AppState.currentUser = {...user, role: isAdminUser() ? 'Admin' : 'Member'};
-    renderShell();
-    if (window.WVAuth) WVAuth.init();
-    setupGlobalSearch();
-    handleRoute();
-    // Always validate the current Google credential against the server and
-    // replace the baseline with the latest shared Google Sheets data.
-    refreshRemoteInBackground({mountIfNeeded:false});
+    renderAuthLoading('Signing you in securely…', 'Loading your workspace and the latest shared dashboard data.');
+    await startAuthenticatedApp(user);
   } catch (err) {
     console.error('Dashboard secure boot failed:', err);
     renderAuthError(err.message || 'Unable to load the secure workspace.');
   }
 }
-
 function isAdminUser() {
   return String(window.WVAuth?.user?.email || '').toLowerCase() === AppState.adminEmail.toLowerCase();
 }
@@ -130,24 +141,15 @@ window.__wvShowLoginGate = function() { renderLoginGate(); };
 
 window.__wvOnAuthenticated = async function(user) {
   try {
-    AppState.currentUser = {...user, role: isAdminUser() ? 'Admin' : 'Member'};
     renderAuthLoading('Signing you in securely…', 'Loading your workspace and the latest shared dashboard data.');
-    await db.activateForUser(user.email);
-    if (window.SEED_DATA && Array.isArray(window.SEED_DATA.vendorMatrixRecords)) {
-      await db.seedFromBundle(window.SEED_DATA);
-    }
-    renderShell();
-    if (window.WVAuth) WVAuth.init();
-    setupGlobalSearch();
-    handleRoute();
-    refreshRemoteInBackground({mountIfNeeded:false});
+    await startAuthenticatedApp(user);
   } catch (e) {
     console.error('[WVAuth] authenticated boot failed', e);
     renderAuthError(e.message || 'Unable to load your workspace.');
   }
 };
 
-async function refreshRemoteInBackground(options = {}) {
+async function _refreshRemoteInBackground(options = {}) {
   const {mountIfNeeded=false} = options;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20000);
@@ -183,6 +185,13 @@ async function refreshRemoteInBackground(options = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+async function refreshRemoteInBackground(options = {}) {
+  if (REMOTE_SYNC_PROMISE) return REMOTE_SYNC_PROMISE;
+  REMOTE_SYNC_PROMISE = _refreshRemoteInBackground(options).finally(() => {
+    REMOTE_SYNC_PROMISE = null;
+  });
+  return REMOTE_SYNC_PROMISE;
 }
 window.__wvRefreshRemoteData = () => refreshRemoteInBackground({mountIfNeeded:!document.getElementById('page-root')});
 

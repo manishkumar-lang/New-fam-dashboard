@@ -34,3 +34,10 @@ Authorized JavaScript origin:
 `https://wellversed-fam-dashboard-new.netlify.app`
 
 Do not commit service-account private keys or client secrets.
+
+
+## Backend reliability / privacy hardening
+- The previous public `site/js/data-bundle.js` is no longer served. The retained baseline dataset is packaged server-side in `netlify/functions/seed-data.js` and is returned only after Google authentication.
+- `fam-data` uses warm-instance caching, in-flight request deduplication, Google API retry/backoff, request timeouts, and stale/seed fallback responses to avoid turning transient Sheets failures into dashboard-breaking 500s.
+- The Google authentication flow is deduplicated so a page reload cannot start multiple `fam-data` builds at once.
+- Legacy contact-import data is retained under `legacy-retained/` and is not exposed as a public site asset.

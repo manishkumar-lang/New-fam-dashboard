@@ -41,3 +41,10 @@ Google Cloud → Google Auth Platform → Clients → Web application:
 - Sign-out par browser-side dashboard cache clear hota hai.
 - Account switch par persisted data isolate/clear hota hai.
 - Private key GitHub mein kabhi upload mat karo.
+
+
+## Backend reliability / privacy hardening
+- The previous public `site/js/data-bundle.js` is no longer served. The retained baseline dataset is packaged server-side in `netlify/functions/seed-data.js` and is returned only after Google authentication.
+- `fam-data` uses warm-instance caching, in-flight request deduplication, Google API retry/backoff, request timeouts, and stale/seed fallback responses to avoid turning transient Sheets failures into dashboard-breaking 500s.
+- The Google authentication flow is deduplicated so a page reload cannot start multiple `fam-data` builds at once.
+- Legacy contact-import data is retained under `legacy-retained/` and is not exposed as a public site asset.

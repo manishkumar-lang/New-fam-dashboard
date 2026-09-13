@@ -1,7 +1,7 @@
 {
   "name": "wellversed-fam-dashboard",
   "private": true,
-  "version": "3.1.0-secure",
+  "version": "3.1.1-secure",
   "engines": {
     "node": ">=20"
   }
