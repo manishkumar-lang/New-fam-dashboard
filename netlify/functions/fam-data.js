@@ -48,7 +48,7 @@ async function verifyGoogleCredential(event){
   const auth=event.headers?.authorization||event.headers?.Authorization||'';
   const m=auth.match(/^Bearer\s+(.+)$/i);
   if(!m) throw Object.assign(new Error('Google sign-in is required before live Sheets data can be loaded.'),{statusCode:401});
-  const clientId=process.env.GOOGLE_CLIENT_ID||'255689281984-s7sukng6nv6coshng1fqa4l1081qda4v.apps.googleusercontent.com';
+  const clientId=process.env.GOOGLE_CLIENT_ID||'255689281984-2t3k3fe19srh84tnjqk3um3psfda58ie.apps.googleusercontent.com';
   const r=await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(m[1])}`);
   const j=await r.json().catch(()=>({}));
   if(!r.ok || j.aud!==clientId || j.email_verified!=='true'){

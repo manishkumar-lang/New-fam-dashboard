@@ -1,5 +1,5 @@
 /* Wellversed FAM — Google Identity Services */
-const GOOGLE_CLIENT_ID = '255689281984-s7sukng6nv6coshng1fqa4l1081qda4v.apps.googleusercontent.com';
+const GOOGLE_CLIENT_ID = '255689281984-2t3k3fe19srh84tnjqk3um3psfda58ie.apps.googleusercontent.com';
 window.__WV_GOOGLE_CLIENT_ID = GOOGLE_CLIENT_ID;
 
 window.WVAuth = {

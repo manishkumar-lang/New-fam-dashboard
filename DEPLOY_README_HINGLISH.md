@@ -26,7 +26,7 @@ Set these in Netlify UI. **Never commit the service-account private key to GitHu
 
 The browser Client ID is:
 
-`255689281984-s7sukng6nv6coshng1fqa4l1081qda4v.apps.googleusercontent.com`
+`255689281984-2t3k3fe19srh84tnjqk3um3psfda58ie.apps.googleusercontent.com`
 
 After the new Netlify site has its final URL, add that exact `https://...netlify.app` URL under **Authorized JavaScript origins** for this Web OAuth client. Do not add a path or trailing slash.
 
