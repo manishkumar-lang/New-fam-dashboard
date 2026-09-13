@@ -1,0 +1,393 @@
+/**
+ * Wellversed FAM DataService
+ *
+ * Fast-start architecture:
+ * 1) Dashboard data is hydrated into memory immediately from SEED_DATA.
+ * 2) IndexedDB is opened/persisted in the background and never blocks first paint.
+ * 3) localStorage is used only as a persistence fallback.
+ * 4) Remote Google Sheets data replaces the in-memory snapshot in the background.
+ *
+ * This prevents a browser/enterprise policy issue with IndexedDB from freezing
+ * the entire dashboard at "Loading source data…".
+ */
+const DB_NAME = 'wellversed_fam_intelligence';
+const DB_VERSION = 2;
+const STORES = [
+  'vendorMatrix', 'solutionMatrix', 'vendors', 'referenceDocs', 'referenceDecisions',
+  'knowledgeBaseDocs', 'employees', 'categories', 'projects', 'tasks',
+  'auditLog', 'savedFilters', 'settings', 'columnConfig', 'scoringConfig', 'trash'
+];
+
+const CATEGORY_COLORS = {
+  'Furniture': '#8b5cf6',
+  'Safety & Security': '#ef4444',
+  'Sanitary & Hygiene': '#06b6d4',
+  'IT Infrastructure': '#4f46e5',
+  'Pantry & Hospitality': '#f59e0b',
+  'Facility & Wellness': '#10b981',
+  'Uncategorized / General Procurement': '#64748b',
+  'Reference / Source Documents': '#0ea5e9',
+};
+
+function emptyStores() {
+  const x = {};
+  STORES.forEach(s => { x[s] = []; });
+  return x;
+}
+
+function categoryRows(categories) {
+  return (categories || []).map((c, i) => ({
+    id: 'cat_' + i,
+    name: c,
+    description: '',
+    color: CATEGORY_COLORS[c] || '#6366f1',
+    order: i,
+  }));
+}
+
+class DataService {
+  constructor() {
+    this.db = null;
+    this.mode = 'memory';
+    this.memory = emptyStores();
+    this.local = emptyStores();
+    this.ready = Promise.resolve();
+    this.persistenceReady = Promise.resolve(false);
+    this._localSaveTimer = null;
+
+    // The bundled snapshot is the fastest and most reliable first-boot source.
+    // data-bundle.js is loaded before db.js in index.html.
+    this._hydrateBundle(window.SEED_DATA);
+
+    // Persistence is deliberately detached from boot.
+    setTimeout(() => this._openPersistence(), 0);
+  }
+
+  _hydrateBundle(bundle) {
+    if (!bundle || !Array.isArray(bundle.vendorMatrixRecords)) return;
+    this.memory.vendorMatrix = bundle.vendorMatrixRecords.slice();
+    this.memory.solutionMatrix = (bundle.solutionMatrixRecords || []).slice();
+    this.memory.vendors = (bundle.vendors || []).slice();
+    this.memory.referenceDocs = (bundle.referenceDocs || []).slice();
+    this.memory.knowledgeBaseDocs = (bundle.knowledgeBaseDocs || []).slice();
+    this.memory.employees = (bundle.employees || []).slice();
+    this.memory.categories = categoryRows(bundle.categories || []);
+    if (bundle.categoryMappingReference) {
+      const ref = {
+        id: bundle.categoryMappingReference.id,
+        title: bundle.categoryMappingReference.title,
+        docType: bundle.categoryMappingReference.docType,
+        category: 'Reference / Source Documents',
+        categorySource: 'source_document',
+        tabs: bundle.categoryMappingReference.tabs,
+        source: bundle.categoryMappingReference.source,
+        lastUpdated: bundle.meta?.generatedAt || new Date().toISOString(),
+        deletedAt: null,
+      };
+      const exists = this.memory.referenceDocs.some(x => x.id === ref.id);
+      if (!exists) this.memory.referenceDocs.push(ref);
+    }
+    this.memory.settings = [{
+      id: 'seedStatus',
+      seeded: true,
+      seededAt: new Date().toISOString(),
+      meta: bundle.meta || {},
+      remote: !!bundle.meta?.remote,
+    }];
+  }
+
+  async _openPersistence() {
+    // file:// and restricted profiles should not block the dashboard.
+    if (!window.indexedDB || location.protocol === 'file:') {
+      this._activateLocalFallback();
+      return;
+    }
+
+    this.persistenceReady = new Promise(resolve => {
+      let settled = false;
+      const done = value => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => {
+        console.warn('[DataService] IndexedDB startup timed out; using local persistence fallback.');
+        this._activateLocalFallback();
+        done(false);
+      }, 1800);
+
+      try {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = e => {
+          const idb = e.target.result;
+          STORES.forEach(name => {
+            if (!idb.objectStoreNames.contains(name)) idb.createObjectStore(name, { keyPath: 'id' });
+          });
+        };
+        req.onerror = () => {
+          console.warn('[DataService] IndexedDB unavailable; using local persistence fallback.');
+          this._activateLocalFallback();
+          done(false);
+        };
+        req.onblocked = () => {
+          console.warn('[DataService] IndexedDB blocked; using local persistence fallback.');
+          this._activateLocalFallback();
+          done(false);
+        };
+        req.onsuccess = async e => {
+          this.db = e.target.result;
+          this.db.onversionchange = () => this.db.close();
+          this.mode = 'idb';
+          try {
+            const persistedSeed = await this._idbGet('settings', 'seedStatus');
+            if (persistedSeed?.seeded) {
+              const loaded = await Promise.all(STORES.map(s => this._idbGetAll(s)));
+              STORES.forEach((s, i) => { this.memory[s] = loaded[i]; });
+              if (!this.memory.vendorMatrix.length && window.SEED_DATA) this._hydrateBundle(window.SEED_DATA);
+            } else {
+              await this._persistAllIdb();
+            }
+          } catch (err) {
+            console.warn('[DataService] Background IndexedDB hydrate failed; keeping memory snapshot.', err);
+          }
+          done(true);
+        };
+      } catch (err) {
+        console.warn('[DataService] IndexedDB exception; using local persistence fallback.', err);
+        this._activateLocalFallback();
+        done(false);
+      }
+    });
+  }
+
+  _activateLocalFallback() {
+    this.mode = 'local';
+    try {
+      const raw = localStorage.getItem(DB_NAME + '_data');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        const hasSeed = Array.isArray(parsed.vendorMatrix) && parsed.vendorMatrix.length;
+        if (hasSeed) {
+          STORES.forEach(s => { if (Array.isArray(parsed[s])) this.memory[s] = parsed[s]; });
+        }
+      }
+      this.local = this.memory;
+      this._saveLocal();
+    } catch (e) {
+      console.warn('[DataService] localStorage unavailable; memory-only mode.', e);
+      this.mode = 'memory';
+    }
+  }
+
+  _saveLocal() {
+    if (this.mode !== 'local') return;
+    clearTimeout(this._localSaveTimer);
+    this._localSaveTimer = setTimeout(() => {
+      try { localStorage.setItem(DB_NAME + '_data', JSON.stringify(this.memory)); }
+      catch (e) { console.warn('[DataService] localStorage save failed; memory-only mode.', e); this.mode = 'memory'; }
+    }, 250);
+  }
+
+  async _idbGet(store, id) {
+    return new Promise(resolve => {
+      try {
+        const req = this.db.transaction(store, 'readonly').objectStore(store).get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      } catch (_) { resolve(null); }
+    });
+  }
+
+  async _idbGetAll(store) {
+    return new Promise(resolve => {
+      try {
+        const req = this.db.transaction(store, 'readonly').objectStore(store).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+      } catch (_) { resolve([]); }
+    });
+  }
+
+  _idbPut(store, obj) {
+    if (!this.db) return Promise.resolve();
+    return new Promise(resolve => {
+      try {
+        const req = this.db.transaction(store, 'readwrite').objectStore(store).put(obj);
+        req.onsuccess = req.onerror = () => resolve();
+      } catch (_) { resolve(); }
+    });
+  }
+
+  _idbDelete(store, id) {
+    if (!this.db) return Promise.resolve();
+    return new Promise(resolve => {
+      try {
+        const req = this.db.transaction(store, 'readwrite').objectStore(store).delete(id);
+        req.onsuccess = req.onerror = () => resolve();
+      } catch (_) { resolve(); }
+    });
+  }
+
+  _idbClear(store) {
+    if (!this.db) return Promise.resolve();
+    return new Promise(resolve => {
+      try {
+        const req = this.db.transaction(store, 'readwrite').objectStore(store).clear();
+        req.onsuccess = req.onerror = () => resolve();
+      } catch (_) { resolve(); }
+    });
+  }
+
+  _idbBulkPut(store, arr) {
+    if (!this.db || !arr?.length) return Promise.resolve();
+    return new Promise(resolve => {
+      try {
+        const tx = this.db.transaction(store, 'readwrite');
+        const os = tx.objectStore(store);
+        arr.forEach(obj => os.put(obj));
+        tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+      } catch (_) { resolve(); }
+    });
+  }
+
+  async _persistAllIdb() {
+    if (!this.db) return;
+    await Promise.all(STORES.map(async store => {
+      await this._idbClear(store);
+      await this._idbBulkPut(store, this.memory[store]);
+    }));
+  }
+
+  async getAll(store) {
+    return (this.memory[store] || []).slice();
+  }
+
+  async get(store, id) {
+    return (this.memory[store] || []).find(x => x.id === id) || null;
+  }
+
+  async put(store, obj) {
+    const arr = this.memory[store] || (this.memory[store] = []);
+    const i = arr.findIndex(x => x.id === obj.id);
+    if (i >= 0) arr[i] = obj; else arr.push(obj);
+    if (this.mode === 'local') this._saveLocal();
+    else this.persistenceReady.then(ok => ok && this._idbPut(store, obj));
+    return obj;
+  }
+
+  async bulkPut(store, arr) {
+    const current = this.memory[store] || (this.memory[store] = []);
+    const map = new Map(current.map(x => [x.id, x]));
+    (arr || []).forEach(x => map.set(x.id, x));
+    this.memory[store] = [...map.values()];
+    if (this.mode === 'local') this._saveLocal();
+    else this.persistenceReady.then(ok => ok && this._idbBulkPut(store, arr || []));
+    return (arr || []).length;
+  }
+
+  async delete(store, id) {
+    this.memory[store] = (this.memory[store] || []).filter(x => x.id !== id);
+    if (this.mode === 'local') this._saveLocal();
+    else this.persistenceReady.then(ok => ok && this._idbDelete(store, id));
+    return true;
+  }
+
+  async clearStore(store) {
+    this.memory[store] = [];
+    if (this.mode === 'local') this._saveLocal();
+    else this.persistenceReady.then(ok => ok && this._idbClear(store));
+    return true;
+  }
+
+  async count(store) { return (this.memory[store] || []).length; }
+
+  async logActivity(action, entityType, entityId, before, after, user = 'local-admin') {
+    const entry = {
+      id: 'log_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8),
+      action, entityType, entityId,
+      before: before ? JSON.parse(JSON.stringify(before)) : null,
+      after: after ? JSON.parse(JSON.stringify(after)) : null,
+      user, timestamp: new Date().toISOString(),
+    };
+    await this.put('auditLog', entry);
+    return entry;
+  }
+
+  async softDelete(store, id, user = 'local-admin') {
+    const obj = await this.get(store, id);
+    if (!obj) return null;
+    const before = { ...obj };
+    obj.deletedAt = new Date().toISOString();
+    obj.deletedBy = user;
+    await this.put(store, obj);
+    await this.put('trash', { id: `${store}::${id}`, store, recordId: id, deletedAt: obj.deletedAt, deletedBy: user, snapshot: before });
+    await this.logActivity('delete', store, id, before, obj, user);
+    return obj;
+  }
+
+  async restore(store, id, user = 'local-admin') {
+    const obj = await this.get(store, id);
+    if (!obj) return null;
+    const before = { ...obj };
+    obj.deletedAt = null; obj.deletedBy = null;
+    await this.put(store, obj);
+    await this.delete('trash', `${store}::${id}`);
+    await this.logActivity('restore', store, id, before, obj, user);
+    return obj;
+  }
+
+  async permanentDelete(store, id, user = 'local-admin') {
+    const obj = await this.get(store, id);
+    await this.delete(store, id);
+    await this.delete('trash', `${store}::${id}`);
+    await this.logActivity('permanent_delete', store, id, obj, null, user);
+    return true;
+  }
+
+  async replaceFromRemoteBundle(bundle) {
+    if (!bundle || !Array.isArray(bundle.vendorMatrixRecords)) throw new Error('Remote sync returned an invalid dashboard dataset.');
+    const updates = {
+      vendorMatrix: bundle.vendorMatrixRecords,
+      solutionMatrix: bundle.solutionMatrixRecords || [],
+      vendors: bundle.vendors || [],
+      referenceDocs: bundle.referenceDocs || [],
+      knowledgeBaseDocs: bundle.knowledgeBaseDocs || [],
+      employees: bundle.employees || [],
+      categories: categoryRows(bundle.categories || []),
+    };
+    Object.entries(updates).forEach(([store, rows]) => { this.memory[store] = rows.slice(); });
+    this.memory.settings = [{ id: 'seedStatus', seeded: true, seededAt: new Date().toISOString(), meta: bundle.meta, remote: true }];
+
+    // Persist remotely-fetched state in the background; UI does not wait for storage.
+    if (this.mode === 'local') this._saveLocal();
+    else this.persistenceReady.then(ok => ok && this._persistAllIdb());
+    return bundle;
+  }
+
+  async syncFromRemote() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const credential = window.WVAuth?.getCredential?.() || '';
+      const headers = credential ? { Authorization: `Bearer ${credential}` } : {};
+      const res = await fetch('/.netlify/functions/fam-data', { cache: 'no-store', signal: controller.signal, headers });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload.error || `Remote sync failed (${res.status})`);
+      return await this.replaceFromRemoteBundle(payload);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async isSeeded() { return !!this.memory.settings.find(x => x.id === 'seedStatus' && x.seeded); }
+
+  async seedFromBundle(bundle) {
+    this._hydrateBundle(bundle);
+    if (this.mode === 'local') this._saveLocal();
+    else this.persistenceReady.then(ok => ok && this._persistAllIdb());
+    return true;
+  }
+}
+
+const db = new DataService();
