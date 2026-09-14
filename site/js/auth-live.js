@@ -31,13 +31,10 @@ window.WVAuth = {
     }
     this.restore();
     this.renderUser();
-    // If a user is already signed in, a page reload must also trigger the
-    // authenticated Sheets sync. Do this after restore so the credential is
-    // available; this avoids the boot/auth race where no fam-data request
-    // was made after refresh.
-    if (this.getCredential()) {
-      setTimeout(() => window.__wvOnAuthenticated?.(this.user), 0);
-    }
+    // Boot owns the authenticated startup flow. Do not call the app boot
+    // callback from init(), because init() can run more than once (the GIS
+    // readiness loop and app boot both call it). Calling it here caused
+    // duplicate fam-data requests and amplified backend load/500s.
     return true;
   },
 

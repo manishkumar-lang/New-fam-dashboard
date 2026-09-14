@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const SEED_DATA = require('./seed-data');
 
 const MAIN_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 // Exact KNO source identified from the user's FAM Index workbook.
@@ -26,23 +27,44 @@ function descRow(headers,row){const nn=row.filter(v=>v!==null&&v!==undefined&&v!
 function sheetType(headers){const h=headers.filter(Boolean).map(x=>String(x).toLowerCase()).join(' ').replace(/\s+/g,' ');if(headers[0]&&String(headers[0]).length>60)return'narrative_brief';if(headers[0]&&/step \d|sop|make sure both devices/i.test(String(headers[0])))return'sop_document';if(headers.filter(Boolean).length<=3)return'reference_table';if(/solution name|solution type/.test(h))return'solution_matrix';if(/vendor name|vender name|vonder name|supplier|contact number|mobile no|contect number/.test(h))return'vendor_matrix';if(/contact|address|phone|mob\.|mobile/.test(h))return'vendor_matrix';if(/brand|model|specification|technology|resolution|capacity|features|material/.test(h))return'solution_matrix';return'unclassified_table';}
 
 function b64url(input){return Buffer.from(input).toString('base64').replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');}
-function b64url(input){return Buffer.from(input).toString('base64').replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');}
+
+let serviceTokenCache = {token:'', expiresAt:0};
+let serviceTokenInflight = null;
+
+async function fetchJson(url, options={}, timeoutMs=12000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    const r=await fetch(url,{...options,signal:controller.signal});
+    const text=await r.text();
+    let j={}; try{j=JSON.parse(text);}catch{}
+    return {r,j};
+  }catch(e){
+    if(e?.name==='AbortError') throw new Error(`Upstream request timed out after ${timeoutMs}ms.`);
+    throw e;
+  }finally{clearTimeout(timer);}
+}
 
 async function accessToken(){
-  const email=process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const raw=process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
-  if(!email||!raw)throw new Error('Google service-account environment variables are missing.');
-  const key=raw.replace(/\\n/g,'\n');
   const now=Math.floor(Date.now()/1000);
-  const header=b64url(JSON.stringify({alg:'RS256',typ:'JWT'}));
-  const claim=b64url(JSON.stringify({iss:email,scope:'https://www.googleapis.com/auth/spreadsheets.readonly',aud:'https://oauth2.googleapis.com/token',iat:now,exp:now+3600}));
-  const signer=crypto.createSign('RSA-SHA256'); signer.update(`${header}.${claim}`);
-  const sig=b64url(signer.sign(key));
-  const assertion=`${header}.${claim}.${sig}`;
-  const r=await fetch('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${encodeURIComponent(assertion)}`});
-  const j=await r.json();
-  if(!r.ok)throw new Error(`Google service-account token error: ${j.error_description||j.error||r.status}`);
-  return j.access_token;
+  if(serviceTokenCache.token && serviceTokenCache.expiresAt-now>120) return serviceTokenCache.token;
+  if(serviceTokenInflight) return serviceTokenInflight;
+  serviceTokenInflight=(async()=>{
+    const email=process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+    const raw=process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
+    if(!email||!raw)throw new Error('Google service-account environment variables are missing.');
+    const key=raw.replace(/\\n/g,'\n');
+    const header=b64url(JSON.stringify({alg:'RS256',typ:'JWT'}));
+    const claim=b64url(JSON.stringify({iss:email,scope:'https://www.googleapis.com/auth/spreadsheets.readonly',aud:'https://oauth2.googleapis.com/token',iat:now,exp:now+3600}));
+    const signer=crypto.createSign('RSA-SHA256'); signer.update(`${header}.${claim}`);
+    const assertion=`${header}.${claim}.${b64url(signer.sign(key))}`;
+    const {r,j}=await fetchJson('https://oauth2.googleapis.com/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:`grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${encodeURIComponent(assertion)}`},10000);
+    if(!r.ok)throw new Error(`Google service-account token error: ${j.error_description||j.error||r.status}`);
+    if(!j.access_token)throw new Error('Google service-account token response did not contain an access token.');
+    serviceTokenCache={token:j.access_token,expiresAt:now+Math.max(300,Number(j.expires_in)||3600)};
+    return j.access_token;
+  })().finally(()=>{serviceTokenInflight=null;});
+  return serviceTokenInflight;
 }
 
 async function verifyGoogleCredential(event){
@@ -50,8 +72,7 @@ async function verifyGoogleCredential(event){
   const m=auth.match(/^Bearer\s+(.+)$/i);
   if(!m) throw Object.assign(new Error('Google sign-in is required before live Sheets data can be loaded.'),{statusCode:401});
   const clientId=process.env.GOOGLE_CLIENT_ID||'255689281984-2t3k3fe19srh84tnjqk3um3psfda58ie.apps.googleusercontent.com';
-  const r=await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(m[1])}`);
-  const j=await r.json().catch(()=>({}));
+  const {r,j}=await fetchJson(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(m[1])}`,{},10000);
   if(!r.ok || j.aud!==clientId || j.email_verified!=='true'){
     throw Object.assign(new Error('Google ID token is invalid or was issued for a different OAuth client.'),{statusCode:401});
   }
@@ -63,11 +84,24 @@ async function verifyGoogleCredential(event){
 }
 
 async function gget(url,token){
-  const r=await fetch(url,{headers:{Authorization:`Bearer ${token}`}});
-  const text=await r.text(); let j={}; try{j=JSON.parse(text);}catch{}
-  if(!r.ok)throw new Error(j.error?.message||`Google Sheets API error ${r.status}`);
-  return j;
+  const maxAttempts=3;
+  let lastError=null;
+  for(let attempt=1;attempt<=maxAttempts;attempt++){
+    try{
+      const {r,j}=await fetchJson(url,{headers:{Authorization:`Bearer ${token}`}},12000);
+      if(r.ok)return j;
+      const retryable=[408,429,500,502,503,504].includes(r.status);
+      lastError=new Error(j.error?.message||`Google Sheets API error ${r.status}`);
+      if(!retryable||attempt===maxAttempts)throw lastError;
+    }catch(e){
+      lastError=e instanceof Error?e:new Error(String(e));
+      if(attempt===maxAttempts)throw lastError;
+    }
+    await new Promise(resolve=>setTimeout(resolve,350*Math.pow(2,attempt-1)+Math.floor(Math.random()*150)));
+  }
+  throw lastError||new Error('Google Sheets API request failed.');
 }
+
 async function values(token,sid,range){
   const url=`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sid)}/values/${encodeURIComponent(range)}?majorDimension=ROWS`;
   const j=await gget(url,token); return j.values||[];
@@ -86,7 +120,7 @@ async function batchValues(token,sid,ranges){
   return out;
 }
 function idsFromText(text){return [...String(text||'').matchAll(/docs\.google\.com\/spreadsheets\/d\/([A-Za-z0-9_-]+)/g)].map(m=>m[1]);}
-async function indexSources(token){
+async function fetchIndexSources(token){
   const j=await gget(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(MAIN_SHEET_ID)}?includeGridData=true&fields=sheets(properties(title),data(rowData(values(formattedValue,hyperlink,userEnteredValue))))`,token);
   const sh=(j.sheets||[]).find(x=>x.properties?.title==='Index')||j.sheets?.[0];
   const rows=sh?.data?.[0]?.rowData||[]; const out=[];
@@ -108,6 +142,18 @@ async function indexSources(token){
   return [...uniq.values()];
 }
 
+const INDEX_CACHE_TTL_MS=10*60*1000;
+let indexCache=null;
+let indexCacheAt=0;
+let indexInflight=null;
+async function indexSources(token){
+  const now=Date.now();
+  if(indexCache && now-indexCacheAt<INDEX_CACHE_TTL_MS) return indexCache;
+  if(indexInflight) return indexInflight;
+  indexInflight=fetchIndexSources(token).then(x=>{indexCache=x;indexCacheAt=Date.now();return x;}).finally(()=>{indexInflight=null;});
+  return indexInflight;
+}
+
 async function mapLimit(items,limit,fn){
   const out=new Array(items.length); let next=0;
   async function worker(){
@@ -120,7 +166,9 @@ async function mapLimit(items,limit,fn){
 async function parseVendorSource(token,src){
   let ss; try{ss=await spreadsheet(token,src.id);}catch(e){return {records:[],refs:[],meta:[{sourceId:src.id,title:src.title,error:e.message}]};}
   const ranges=(ss.sheets||[]).map(sh=>`'${String(sh.properties.title).replace(/'/g,"''")}'`);
-  const vr=await batchValues(token,src.id,ranges);
+  let vr=[];
+  try{ vr=await batchValues(token,src.id,ranges); }
+  catch(e){ return {records:[],refs:[],meta:[{sourceId:src.id,title:src.title,error:`Sheet values unavailable: ${e.message}`}]}; }
   const records=[],refs=[],meta=[];
   for(let idx=0;idx<(ss.sheets||[]).length;idx++){
     const sh=ss.sheets[idx], name=sh.properties.title, rows=(vr[idx]?.values||[]); if(!rows.length)continue;
@@ -146,7 +194,7 @@ async function parseVendorSource(token,src){
 }
 
 async function parseVendorSources(token,sources){
-  const results=await mapLimit(sources,5,src=>parseVendorSource(token,src));
+  const results=await mapLimit(sources,3,src=>parseVendorSource(token,src));
   return results.reduce((a,x)=>({records:a.records.concat(x?.records||[]),refs:a.refs.concat(x?.refs||[]),meta:a.meta.concat(x?.meta||[])}),{records:[],refs:[],meta:[]});
 }
 
@@ -163,7 +211,10 @@ async function parseKno(token){
   const names=[...employeeNames].sort((a,b)=>b.length-a.length),extractEmp=n=>names.find(x=>n.toLowerCase().includes(x.toLowerCase()))||null;
   const sheets=(ss.sheets||[]).filter(sh=>sh.properties.title!=='Employee Index');
   const ranges=sheets.map(sh=>`'${String(sh.properties.title).replace(/'/g,"''")}'`);
-  const vr=await batchValues(token,KNO_SHEET_ID,ranges);
+  let vr=[];
+  try{vr=await batchValues(token,KNO_SHEET_ID,ranges);}catch(e){
+    return {employees,docs,meta:[...meta,{sourceId:KNO_SHEET_ID,error:e.message}],error:e.message};
+  }
   for(let idx=0;idx<sheets.length;idx++){
     const name=sheets[idx].properties.title,rows=vr[idx]?.values||[];if(!rows.length)continue;
     const headers=rows[0]||[],start=rows[1]&&descRow(headers,rows[1])?2:1,data=rows.slice(start).filter(r=>r.some(v=>clean(v)!==null));
@@ -176,34 +227,177 @@ async function parseKno(token){
   return {employees,docs,meta,error:null};
 }
 
+// Warm-instance cache: the dashboard dataset is shared across authenticated
+// Wellversed users, while identity/permissions are applied per request below.
+// This prevents every page load from re-reading the source workbooks.
+const CACHE_TTL_MS=5*60*1000;
+let dashboardCache=null;
+let dashboardCacheAt=0;
+let dashboardInflight=null;
+let dashboardLastBuildError=null;
+
+function cachedBundleFor(identity,base){
+  const bundle={...base};
+  bundle.meta={...(base.meta||{}),signedInAs:identity.email};
+  bundle.permissions={admin:String(identity.email).toLowerCase()===ADMIN_EMAIL};
+  return bundle;
+}
+
+async function buildDashboardBundle(token){
+  const sources=await indexSources(token);
+  if(!sources.length)throw new Error('No Vendor/Solution Matrix Google Sheets were found in the FAM Index sheet.');
+  const v=await parseVendorSources(token,sources);
+  const k=await parseKno(token);
+  const vm=v.records.filter(r=>r.recordType==='vendor_matrix'),sm=v.records.filter(r=>r.recordType==='solution_matrix');
+  if(!vm.length && !sm.length)throw new Error('The service account could not read any Vendor/Solution Matrix source sheets. Share the source sheets with the service account as Viewer.');
+  const vi=new Map();
+  for(const r of vm){
+    const n=r.normalized.vendorName;if(!n||typeof n!=='string')continue;const key=n.trim().toLowerCase();
+    if(!vi.has(key))vi.set(key,{id:id('vendor',key),vendorName:n.trim(),categories:new Set(),productLines:new Set(),phones:new Set(),locations:new Set(),recordIds:[]});
+    const x=vi.get(key);x.categories.add(r.category);x.productLines.add(r.productLine);if(r.normalized.phone)x.phones.add(String(r.normalized.phone));if(r.normalized.address)x.locations.add(String(r.normalized.address));x.recordIds.push(r.id);
+  }
+  const vendors=[...vi.values()].map(x=>({id:x.id,vendorName:x.vendorName,categories:[...x.categories].sort(),productLines:[...x.productLines].sort(),phones:[...x.phones].sort(),locations:[...x.locations].sort(),recordIds:x.recordIds,recordCount:x.recordIds.length})).sort((a,b)=>a.vendorName.localeCompare(b.vendorName));
+  const categories=[...new Set(vm.map(x=>x.category))].sort(),now=new Date().toISOString();
+  return {meta:{generatedAt:now,sourceFiles:['Google Sheets live source'],vendorWorkbookSheetCount:v.meta.length,knoWorkbookSheetCount:k.meta.length,vendorMatrixRecordCount:vm.length,solutionMatrixRecordCount:sm.length,distinctVendorCount:vendors.length,categoryCount:categories.length,knowledgeBaseDocCount:k.docs.length,referenceDocCount:v.refs.length,employeeCount:k.employees.length,sourceSpreadsheetCount:sources.length,remote:true,sourceWarnings:[...v.meta.filter(x=>x.error||x.warning),...(k.error?[{sourceId:KNO_SHEET_ID,error:k.error}]:[])]},categories,vendors,vendorMatrixRecords:vm,solutionMatrixRecords:sm,vendorSheetsMeta:v.meta,knoSheetsMeta:k.meta,employees:k.employees,knowledgeBaseDocs:k.docs,referenceDocs:v.refs,categoryMappingReference:{id:id('remote-index'),title:'FAM Google Sheets Index',docType:'category_mapping_reference',tabs:sources,source:{spreadsheetId:MAIN_SHEET_ID}}};
+}
+
+function mergeById(baseRows, liveRows){
+  const map=new Map();
+  for(const row of (baseRows||[])){ if(row?.id) map.set(row.id,row); }
+  for(const row of (liveRows||[])){ if(row?.id) map.set(row.id,row); }
+  return [...map.values()];
+}
+
+function deriveVendors(records){
+  const vi=new Map();
+  for(const r of (records||[]).filter(x=>x.recordType==='vendor_matrix')){
+    const n=r?.normalized?.vendorName;
+    if(!n || typeof n!=='string') continue;
+    const key=n.trim().toLowerCase();
+    if(!key) continue;
+    if(!vi.has(key)) vi.set(key,{id:id('vendor',key),vendorName:n.trim(),categories:new Set(),productLines:new Set(),phones:new Set(),locations:new Set(),recordIds:[]});
+    const x=vi.get(key);
+    if(r.category) x.categories.add(r.category);
+    if(r.productLine) x.productLines.add(r.productLine);
+    if(r.normalized.phone) x.phones.add(String(r.normalized.phone));
+    if(r.normalized.address) x.locations.add(String(r.normalized.address));
+    x.recordIds.push(r.id);
+  }
+  return [...vi.values()].map(x=>({
+    id:x.id,vendorName:x.vendorName,categories:[...x.categories].sort(),productLines:[...x.productLines].sort(),
+    phones:[...x.phones].sort(),locations:[...x.locations].sort(),recordIds:x.recordIds,recordCount:x.recordIds.length
+  })).sort((a,b)=>a.vendorName.localeCompare(b.vendorName));
+}
+
+function baselineCounts(){
+  const b=SEED_DATA||{};
+  return {
+    vendorMatrixRecords:Array.isArray(b.vendorMatrixRecords)?b.vendorMatrixRecords.length:Number(b.meta?.vendorMatrixRecordCount||0),
+    solutionMatrixRecords:Array.isArray(b.solutionMatrixRecords)?b.solutionMatrixRecords.length:Number(b.meta?.solutionMatrixRecordCount||0),
+    distinctVendorCount:Array.isArray(b.vendors)?b.vendors.length:Number(b.meta?.distinctVendorCount||0),
+    categoryCount:Array.isArray(b.categories)?b.categories.length:Number(b.meta?.categoryCount||0),
+    knowledgeBaseDocCount:Array.isArray(b.knowledgeBaseDocs)?b.knowledgeBaseDocs.length:Number(b.meta?.knowledgeBaseDocCount||0),
+    referenceDocCount:Array.isArray(b.referenceDocs)?b.referenceDocs.length:Number(b.meta?.referenceDocCount||0),
+    employeeCount:Array.isArray(b.employees)?b.employees.length:Number(b.meta?.employeeCount||0),
+  };
+}
+
+function mergeWithLastKnownGood(live){
+  const base=SEED_DATA||{};
+  const vendorMatrixRecords=mergeById(base.vendorMatrixRecords,live.vendorMatrixRecords);
+  const solutionMatrixRecords=mergeById(base.solutionMatrixRecords,live.solutionMatrixRecords);
+  const vendors=deriveVendors(vendorMatrixRecords);
+  const categories=[...new Set(vendorMatrixRecords.map(r=>r.category).filter(Boolean))].sort();
+  const referenceDocs=mergeById(base.referenceDocs,live.referenceDocs);
+  const knowledgeBaseDocs=mergeById(base.knowledgeBaseDocs,live.knowledgeBaseDocs);
+  const employees=mergeById(base.employees,live.employees);
+  const counts={vendorMatrixRecords:vendorMatrixRecords.length,solutionMatrixRecords:solutionMatrixRecords.length,distinctVendorCount:vendors.length,categoryCount:categories.length,knowledgeBaseDocCount:knowledgeBaseDocs.length,referenceDocCount:referenceDocs.length,employeeCount:employees.length};
+  const baseline=baselineCounts();
+  const missing=Object.keys(baseline).filter(k=>baseline[k]>0 && counts[k]<baseline[k]);
+  if(missing.length) throw new Error(`Merged dashboard dataset failed integrity check: ${missing.map(k=>`${k} ${counts[k]}/${baseline[k]}`).join(', ')}`);
+  const now=new Date().toISOString();
+  return {
+    meta:{
+      generatedAt:now,sourceFiles:['Google Sheets live source + last-known-good retained records'],
+      vendorWorkbookSheetCount:live.vendorSheetsMeta?.length||0,knoWorkbookSheetCount:live.knoSheetsMeta?.length||0,
+      ...counts,sourceSpreadsheetCount:live.meta?.sourceSpreadsheetCount||0,remote:true,merged:true,
+      liveCounts:{
+        vendorMatrixRecords:Array.isArray(live.vendorMatrixRecords)?live.vendorMatrixRecords.length:0,
+        solutionMatrixRecords:Array.isArray(live.solutionMatrixRecords)?live.solutionMatrixRecords.length:0,
+        distinctVendorCount:Array.isArray(live.vendors)?live.vendors.length:0,
+        categoryCount:Array.isArray(live.categories)?live.categories.length:0,
+        knowledgeBaseDocCount:Array.isArray(live.knowledgeBaseDocs)?live.knowledgeBaseDocs.length:0,
+        referenceDocCount:Array.isArray(live.referenceDocs)?live.referenceDocs.length:0,
+        employeeCount:Array.isArray(live.employees)?live.employees.length:0,
+      },
+      retainedFromBaseline:{
+        vendorMatrixRecords:Math.max(0,vendorMatrixRecords.length-(live.vendorMatrixRecords||[]).length),
+        solutionMatrixRecords:Math.max(0,solutionMatrixRecords.length-(live.solutionMatrixRecords||[]).length),
+      },
+      sourceWarnings:live.meta?.sourceWarnings||[],
+      integrity:'passed'
+    },
+    categories,vendors,vendorMatrixRecords,solutionMatrixRecords,
+    vendorSheetsMeta:live.vendorSheetsMeta||[],knoSheetsMeta:live.knoSheetsMeta||[],employees,
+    knowledgeBaseDocs,referenceDocs,
+    categoryMappingReference:live.categoryMappingReference||base.categoryMappingReference
+  };
+}
+
+function seedFallbackBundle(reason){
+  return {...SEED_DATA,meta:{...(SEED_DATA.meta||{}),remote:false,fallback:true,dataSource:'last-known-good-seed',fallbackReason:reason||'Live source was unavailable; retained verified baseline.'}};
+}
+
+async function getDashboardBundle(token){
+  const now=Date.now();
+  if(dashboardCache && now-dashboardCacheAt<CACHE_TTL_MS) return dashboardCache;
+  if(dashboardInflight) return dashboardInflight;
+  dashboardInflight=buildDashboardBundle(token).then(bundle=>{
+    try{
+      const merged=mergeWithLastKnownGood(bundle);
+      dashboardCache=merged; dashboardCacheAt=Date.now(); dashboardLastBuildError=null;
+      return merged;
+    }catch(err){
+      dashboardLastBuildError={message:err.message,at:new Date().toISOString()};
+      const safe=seedFallbackBundle(err.message);
+      dashboardCache=safe; dashboardCacheAt=Date.now();
+      console.warn('[fam-data] live dataset merge rejected; retaining verified baseline',err);
+      return safe;
+    }
+  }).catch(err=>{
+    dashboardLastBuildError={message:err.message,at:new Date().toISOString()};
+    if(dashboardCache) return dashboardCache;
+    return seedFallbackBundle(err.message);
+  }).finally(()=>{dashboardInflight=null;});
+  return dashboardInflight;
+}
+
 exports.handler=async(event)=>{
+  let identity=null;
   const origin=event.headers?.origin||event.headers?.Origin||'';
   const headers={'Content-Type':'application/json','Cache-Control':'no-store','Vary':'Origin'};
-  if(origin)headers['Access-Control-Allow-Origin']=origin;
+  if(origin && /^https:\/\/[a-z0-9-]+--wellversed-fam-dashboard-new\.netlify\.app$/.test(origin)) headers['Access-Control-Allow-Origin']=origin;
   headers['Access-Control-Allow-Headers']='Content-Type, Authorization';
   if(event.httpMethod==='OPTIONS')return{statusCode:204,headers,body:''};
   try{
-    const identity=await verifyGoogleCredential(event);
+    identity=await verifyGoogleCredential(event);
     if(!MAIN_SHEET_ID)throw new Error('GOOGLE_SHEET_ID is not configured.');
     const token=await accessToken();
-    const sources=await indexSources(token);
-    if(!sources.length)throw new Error('No Vendor/Solution Matrix Google Sheets were found in the FAM Index sheet.');
-    const v=await parseVendorSources(token,sources);
-    const k=await parseKno(token);
-    const vm=v.records.filter(r=>r.recordType==='vendor_matrix'),sm=v.records.filter(r=>r.recordType==='solution_matrix');
-    if(!vm.length && !sm.length)throw new Error('The service account could not read any Vendor/Solution Matrix source sheets. Share the source sheets with the service account as Viewer.');
-    const vi=new Map();
-    for(const r of vm){
-      const n=r.normalized.vendorName;if(!n||typeof n!=='string')continue;const key=n.trim().toLowerCase();
-      if(!vi.has(key))vi.set(key,{id:id('vendor',key),vendorName:n.trim(),categories:new Set(),productLines:new Set(),phones:new Set(),locations:new Set(),recordIds:[]});
-      const x=vi.get(key);x.categories.add(r.category);x.productLines.add(r.productLine);if(r.normalized.phone)x.phones.add(String(r.normalized.phone));if(r.normalized.address)x.locations.add(String(r.normalized.address));x.recordIds.push(r.id);
-    }
-    const vendors=[...vi.values()].map(x=>({id:x.id,vendorName:x.vendorName,categories:[...x.categories].sort(),productLines:[...x.productLines].sort(),phones:[...x.phones].sort(),locations:[...x.locations].sort(),recordIds:x.recordIds,recordCount:x.recordIds.length})).sort((a,b)=>a.vendorName.localeCompare(b.vendorName));
-    const categories=[...new Set(vm.map(x=>x.category))].sort(),now=new Date().toISOString();
-    const bundle={meta:{generatedAt:now,sourceFiles:['Google Sheets live source'],vendorWorkbookSheetCount:v.meta.length,knoWorkbookSheetCount:k.meta.length,vendorMatrixRecordCount:vm.length,solutionMatrixRecordCount:sm.length,distinctVendorCount:vendors.length,categoryCount:categories.length,knowledgeBaseDocCount:k.docs.length,referenceDocCount:v.refs.length,employeeCount:k.employees.length,sourceSpreadsheetCount:sources.length,remote:true,signedInAs:identity.email,sourceWarnings:[...v.meta.filter(x=>x.error||x.warning),...(k.error?[{sourceId:KNO_SHEET_ID,error:k.error}]:[])]},permissions:{admin:String(identity.email).toLowerCase()===ADMIN_EMAIL},categories,vendors,vendorMatrixRecords:vm,solutionMatrixRecords:sm,vendorSheetsMeta:v.meta,knoSheetsMeta:k.meta,employees:k.employees,knowledgeBaseDocs:k.docs,referenceDocs:v.refs,categoryMappingReference:{id:id('remote-index'),title:'FAM Google Sheets Index',docType:'category_mapping_reference',tabs:sources,source:{spreadsheetId:MAIN_SHEET_ID}}};
-    return{statusCode:200,headers,body:JSON.stringify(bundle)};
+    const base=await getDashboardBundle(token);
+    if(dashboardLastBuildError && dashboardCache && base===dashboardCache) headers['X-FAM-Cache']='stale-fallback';
+    return{statusCode:200,headers,body:JSON.stringify(cachedBundleFor(identity,base))};
   }catch(e){
     console.error('[fam-data]',e);
-    return{statusCode:e.statusCode||500,headers,body:JSON.stringify({error:e.message||String(e)})};
+    if(dashboardCache && identity){
+      headers['X-FAM-Cache']='stale-fallback';
+      return{statusCode:200,headers,body:JSON.stringify(cachedBundleFor(identity,dashboardCache))};
+    }
+    if(identity && e.statusCode !== 401 && e.statusCode !== 403){
+      headers['X-FAM-Cache']='seed-fallback';
+      const seed = seedFallbackBundle(e.message||String(e));
+      return{statusCode:200,headers,body:JSON.stringify(cachedBundleFor(identity,seed))};
+    }
+    const status=e.statusCode||503;
+    return{statusCode:status,headers,body:JSON.stringify({error:e.message||String(e),retryable:status>=500})};
   }
 };
