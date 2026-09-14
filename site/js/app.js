@@ -163,7 +163,13 @@ async function _refreshRemoteInBackground(options = {}) {
       throw new Error(payload.error || `Remote sync failed (${res.status})`);
     }
     if (!payload || !Array.isArray(payload.vendorMatrixRecords)) throw new Error('Remote sync returned an invalid dashboard dataset.');
-    await db.replaceFromRemoteBundle(payload);
+    try {
+      await db.replaceFromRemoteBundle(payload);
+    } catch (integrityError) {
+      // Do not destroy a valid workspace because the upstream source returned partial data.
+      console.warn('[Dashboard] Live sync rejected; retaining last known-good data.', integrityError);
+      return false;
+    }
     window.SEED_DATA = { meta: payload.meta || { remote:true, generatedAt:new Date().toISOString() }, categories: payload.categories || [] };
     console.info('Live Google Sheets sync complete:', payload.meta);
     if (mountIfNeeded || !document.getElementById('page-root')) {

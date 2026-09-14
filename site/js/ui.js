@@ -224,14 +224,15 @@ function emptyState({ icon = '📭', title, message, actionLabel, actionId }) {
 
 /** ---------- Count-up animation for KPIs ---------- */
 function animateCountUp(el, target, isCurrency = false, duration = 700) {
+  const safeTarget = Math.max(0, Number.isFinite(Number(target)) ? Number(target) : 0);
   const start = 0;
   const startTime = performance.now();
   const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  if (prefersReduced) { el.textContent = isCurrency ? fmtCurrency(target) : fmtNumber(target); return; }
+  if (prefersReduced) { el.textContent = isCurrency ? fmtCurrency(safeTarget) : fmtNumber(safeTarget); return; }
   function step(now) {
     const progress = Math.min(1, (now - startTime) / duration);
     const eased = 1 - Math.pow(1 - progress, 3);
-    const value = Math.round(start + (target - start) * eased);
+    const value = Math.round(start + (safeTarget - start) * eased);
     el.textContent = isCurrency ? fmtCurrency(value) : fmtNumber(value);
     if (progress < 1) requestAnimationFrame(step);
   }

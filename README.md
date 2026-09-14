@@ -1,3 +1,5 @@
+
+**Build:** v3.2.0 — retained-data merge + backend hardening + personal Sheets cache
 # Wellversed FAM Intelligence — Secure Production Build
 
 Privacy-first Netlify deployment for the Wellversed FAM dashboard.

@@ -19,6 +19,47 @@ const STORES = [
   'auditLog', 'savedFilters', 'settings', 'columnConfig', 'scoringConfig', 'trash'
 ];
 
+// Last-known-good minimums. These are integrity floors, not hard maximums: live data may grow.
+// They prevent a partial Google Sheets response from ever replacing a complete dataset.
+const DATA_INTEGRITY_FLOOR = Object.freeze({
+  vendorMatrixRecords: 542,
+  solutionMatrixRecords: 233,
+  distinctVendorCount: 343,
+  categoryCount: 7,
+  knowledgeBaseDocCount: 165,
+  referenceDocCount: 10,
+  employeeCount: 17,
+});
+
+function dashboardBundleCounts(bundle) {
+  const vendorRows = Array.isArray(bundle?.vendorMatrixRecords) ? bundle.vendorMatrixRecords.filter(Boolean) : [];
+  const solutionRows = Array.isArray(bundle?.solutionMatrixRecords) ? bundle.solutionMatrixRecords.filter(Boolean) : [];
+  const refs = Array.isArray(bundle?.referenceDocs) ? bundle.referenceDocs.filter(Boolean) : [];
+  const kb = Array.isArray(bundle?.knowledgeBaseDocs) ? bundle.knowledgeBaseDocs.filter(Boolean) : [];
+  const employees = Array.isArray(bundle?.employees) ? bundle.employees.filter(Boolean) : [];
+  const categories = Array.isArray(bundle?.categories) ? bundle.categories.filter(Boolean) : [];
+  const vendors = Array.isArray(bundle?.vendors) ? bundle.vendors.filter(Boolean) : [];
+  return {
+    vendorMatrixRecords: vendorRows.length, solutionMatrixRecords: solutionRows.length,
+    distinctVendorCount: vendors.length, categoryCount: categories.length,
+    knowledgeBaseDocCount: kb.length, referenceDocCount: refs.length, employeeCount: employees.length,
+  };
+}
+
+function assertDashboardIntegrity(bundle) {
+  const counts = dashboardBundleCounts(bundle);
+  const missing = Object.entries(DATA_INTEGRITY_FLOOR)
+    .filter(([key, floor]) => counts[key] < floor)
+    .map(([key, floor]) => `${key} ${counts[key]}/${floor}`);
+  if (missing.length) {
+    const err = new Error(`Dashboard dataset failed integrity check: ${missing.join(', ')}`);
+    err.code = 'DATASET_INTEGRITY_FAILED';
+    err.counts = counts;
+    throw err;
+  }
+  return counts;
+}
+
 const CATEGORY_COLORS = {
   'Furniture': '#8b5cf6',
   'Safety & Security': '#ef4444',
@@ -398,6 +439,22 @@ class DataService {
 
   async replaceFromRemoteBundle(bundle) {
     if (!bundle || !Array.isArray(bundle.vendorMatrixRecords)) throw new Error('Remote sync returned an invalid dashboard dataset.');
+    // Never replace an existing complete workspace with a partial/empty response.
+    // The server performs the same integrity check, but this second gate protects the browser.
+    const incoming = { ...bundle, categories: Array.isArray(bundle.categories) ? bundle.categories : [] };
+    const incomingCounts = dashboardBundleCounts(incoming);
+    if (incomingCounts.vendorMatrixRecords < DATA_INTEGRITY_FLOOR.vendorMatrixRecords ||
+        incomingCounts.solutionMatrixRecords < DATA_INTEGRITY_FLOOR.solutionMatrixRecords ||
+        incomingCounts.distinctVendorCount < DATA_INTEGRITY_FLOOR.distinctVendorCount ||
+        incomingCounts.categoryCount < DATA_INTEGRITY_FLOOR.categoryCount ||
+        incomingCounts.knowledgeBaseDocCount < DATA_INTEGRITY_FLOOR.knowledgeBaseDocCount ||
+        incomingCounts.referenceDocCount < DATA_INTEGRITY_FLOOR.referenceDocCount ||
+        incomingCounts.employeeCount < DATA_INTEGRITY_FLOOR.employeeCount) {
+      const err = new Error(`Remote dashboard data is incomplete; keeping the last known-good workspace. ${Object.entries(DATA_INTEGRITY_FLOOR).map(([k,v]) => `${k}=${incomingCounts[k]}/${v}`).join(', ')}`);
+      err.code = 'DATASET_INTEGRITY_FAILED';
+      console.warn('[DataService] rejected incomplete remote dataset', incomingCounts);
+      throw err;
+    }
     const updates = {
       vendorMatrix: bundle.vendorMatrixRecords,
       solutionMatrix: bundle.solutionMatrixRecords || [],

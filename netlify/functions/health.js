@@ -11,6 +11,7 @@ exports.handler = async (event) => {
       ok: true,
       service: 'wellversed-fam-netlify-functions',
       functions: ['health','fam-data','personal-data'],
+      datasetIntegrityFloor: {vendorMatrixRecords:542,solutionMatrixRecords:233,distinctVendorCount:343,categoryCount:7,knowledgeBaseDocCount:165,referenceDocCount:10,employeeCount:17},
       configured: {
         sheetId: !!process.env.GOOGLE_SHEET_ID,
         serviceAccountEmail: !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,

@@ -27,15 +27,16 @@ PAGE_RENDERERS.overview = async function (root) {
     { label: 'Scored records', value: activeVendorRecords.length ? Math.round(withScore.length / activeVendorRecords.length * 100) : 0 },
   ];
 
+  const safeCount = value => Math.max(0, Number.isFinite(Number(value)) ? Number(value) : 0);
   const kpis = [
-    { id: 'vendors', label: text('kpiVendors', 'Distinct Vendors'), value: vendors.length, icon: '🏢', color: 'var(--indigo-600)', route: 'vendors' },
-    { id: 'vendor-records', label: text('kpiVendorRecords', 'Vendor Matrix Records'), value: activeVendorRecords.length, icon: '🏷', color: 'var(--cyan-500)', route: 'vendors' },
-    { id: 'solution-records', label: text('kpiSolutionRecords', 'Solution Matrix Records'), value: activeSolutionRecords.length, icon: '⚙', color: 'var(--purple-500)', route: 'solutions' },
-    { id: 'categories', label: text('kpiCategories', 'Categories'), value: categories.length, icon: '▤', color: 'var(--emerald-500)', route: 'categories' },
-    { id: 'references', label: text('kpiReferences', 'Reference Documents'), value: activeRefDocs.length, icon: '☍', color: 'var(--amber-500)', route: 'referencing' },
-    { id: 'kb', label: text('kpiKnowledge', 'Knowledge Base Docs'), value: kbDocs.filter(d=>!d.deletedAt).length, icon: '☰', color: '#0ea5e9', route: 'knowledge' },
-    { id: 'scored', label: text('kpiScored', 'Vendor Records Scored'), value: withScore.length, icon: '★', color: '#f97316', route: 'vendors' },
-    { id: 'trash', label: text('kpiTrash', 'Items in Trash'), value: trash.length, icon: '🗑', color: '#64748b', route: 'trash' },
+    { id: 'vendors', label: text('kpiVendors', 'Distinct Vendors'), value: safeCount(vendors.length), icon: '🏢', color: 'var(--indigo-600)', route: 'vendors' },
+    { id: 'vendor-records', label: text('kpiVendorRecords', 'Vendor Matrix Records'), value: safeCount(activeVendorRecords.length), icon: '🏷', color: 'var(--cyan-500)', route: 'vendors' },
+    { id: 'solution-records', label: text('kpiSolutionRecords', 'Solution Matrix Records'), value: safeCount(activeSolutionRecords.length), icon: '⚙', color: 'var(--purple-500)', route: 'solutions' },
+    { id: 'categories', label: text('kpiCategories', 'Categories'), value: safeCount(categories.length), icon: '▤', color: 'var(--emerald-500)', route: 'categories' },
+    { id: 'references', label: text('kpiReferences', 'Reference Documents'), value: safeCount(activeRefDocs.length), icon: '☍', color: 'var(--amber-500)', route: 'referencing' },
+    { id: 'kb', label: text('kpiKnowledge', 'Knowledge Base Docs'), value: safeCount(kbDocs.filter(d=>!d.deletedAt).length), icon: '☰', color: '#0ea5e9', route: 'knowledge' },
+    { id: 'scored', label: text('kpiScored', 'Vendor Records Scored'), value: safeCount(withScore.length), icon: '★', color: '#f97316', route: 'vendors' },
+    { id: 'trash', label: text('kpiTrash', 'Items in Trash'), value: safeCount(trash.length), icon: '🗑', color: '#64748b', route: 'trash' },
   ];
 
   const categoryCounts = {};

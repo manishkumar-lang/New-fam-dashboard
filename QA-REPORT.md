@@ -1,53 +1,30 @@
-# Wellversed FAM v3.1.1 — QA Report
+# Wellversed FAM v3.3.0 — QA Report
 
-## Automated checks completed
+## Verified offline
+- Seed Vendor Matrix: 542
+- Seed Solution Matrix: 233
+- Seed distinct vendors: 343
+- Seed categories: 7
+- Seed Knowledge Base docs: 165
+- Seed reference docs: 10
+- Seed employees: 17
+- JavaScript syntax: all application pages and Netlify Functions pass `node --check`
+- `netlify.toml`: publish `site`, functions `netlify/functions`, Node 20
+- Public browser bundle does not contain the full dashboard dataset; the verified seed remains server-side in `netlify/functions/seed-data.js`.
 
-- All JavaScript files pass `node --check` syntax validation.
-- ZIP archive integrity verified with `unzip -t`.
-- Retained baseline dataset counts verified:
-  - 542 vendor matrix records
-  - 233 solution matrix records
-  - 343 distinct vendors
-  - 7 categories
-  - 165 knowledge-base documents
-  - 10 reference documents
-  - 17 employees
-- `fam-data` mocked Google API integration tested for:
-  - unauthenticated request -> 401
-  - authenticated request -> 200
-  - admin permission mapping
-  - warm cache reuse
-  - 10 simultaneous requests sharing one in-flight build
-  - invalid credential remains 401 even when cache exists
-  - stale-cache fallback -> 200
-  - server-side retained seed fallback -> 200 with the original 542-record baseline
-- `personal-data` mocked Google API integration tested for:
-  - unauthenticated request -> 401
-  - user isolation: only the signed-in user's registry row is returned
-  - connected-sheet read path
-  - connect/update path
-- Frontend contract checks verified:
-  - authentication boot is deduplicated
-  - duplicate `fam-data` calls on reload are prevented
-  - remote sync is in-flight deduplicated
-  - late IndexedDB startup cannot race with the local fallback
-  - public `site/js/data-bundle.js` is no longer served
-  - legacy contact import is retained outside public site assets
-- Static site asset references were checked; only the Netlify HUD endpoint is expected to be unavailable in a plain local static-server test.
+## Runtime protections
+- Server-side last-known-good merge/fallback for partial Google Sheets responses.
+- Five-minute shared warm-instance dashboard cache and in-flight request deduplication.
+- Google Sheets retry/backoff and request timeouts.
+- Browser-side dataset integrity gate prevents an incomplete remote response from replacing a valid workspace.
+- KPI count rendering clamps invalid/negative values to zero.
+- Navigation is driven by the centralized hashchange router.
+- Personal Sheets are isolated by verified Google email and return explicit permission errors.
 
-## Reliability changes
+## Environment-dependent tests still required on Netlify
+- Google OAuth against the production origin.
+- Live Google Sheets permissions/service-account access.
+- Actual Netlify function runtime and Google API responses.
+- Personal Sheet connection with a real Sheet shared to the service account as Viewer.
 
-- 5-minute shared dashboard cache per warm function instance.
-- 10-minute FAM Index cache.
-- In-flight request deduplication.
-- Service-account access-token caching and deduplication.
-- Google Sheets retry/backoff for transient 408/429/5xx failures.
-- Upstream request timeouts.
-- Per-source read failure isolation so one source does not automatically destroy the entire dataset.
-- Stale cache fallback after a previously successful build.
-- Server-side baseline seed fallback after authentication if Google Sheets is temporarily unavailable.
-- Frontend authentication and live-sync request deduplication.
-
-## Important limitation
-
-These tests use mocked Google OAuth/Sheets responses. They cannot reproduce the user's private Netlify environment, Google API quotas, exact source-sheet permissions, or live Google token. The package is therefore hardened and locally tested, but a final Deploy Preview smoke test against the real Netlify environment is still required before merging to `main`.
+These cannot be truthfully certified offline without the real Google/Netlify credentials and runtime.

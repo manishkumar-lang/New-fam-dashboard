@@ -1,3 +1,5 @@
+
+**Build:** v3.2.0 — retained-data merge + backend hardening + personal Sheets cache
 # Wellversed FAM — Secure Deployment (Hinglish)
 
 ## Ab dashboard ka behaviour

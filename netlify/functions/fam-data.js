@@ -261,23 +261,116 @@ async function buildDashboardBundle(token){
   return {meta:{generatedAt:now,sourceFiles:['Google Sheets live source'],vendorWorkbookSheetCount:v.meta.length,knoWorkbookSheetCount:k.meta.length,vendorMatrixRecordCount:vm.length,solutionMatrixRecordCount:sm.length,distinctVendorCount:vendors.length,categoryCount:categories.length,knowledgeBaseDocCount:k.docs.length,referenceDocCount:v.refs.length,employeeCount:k.employees.length,sourceSpreadsheetCount:sources.length,remote:true,sourceWarnings:[...v.meta.filter(x=>x.error||x.warning),...(k.error?[{sourceId:KNO_SHEET_ID,error:k.error}]:[])]},categories,vendors,vendorMatrixRecords:vm,solutionMatrixRecords:sm,vendorSheetsMeta:v.meta,knoSheetsMeta:k.meta,employees:k.employees,knowledgeBaseDocs:k.docs,referenceDocs:v.refs,categoryMappingReference:{id:id('remote-index'),title:'FAM Google Sheets Index',docType:'category_mapping_reference',tabs:sources,source:{spreadsheetId:MAIN_SHEET_ID}}};
 }
 
+function mergeById(baseRows, liveRows){
+  const map=new Map();
+  for(const row of (baseRows||[])){ if(row?.id) map.set(row.id,row); }
+  for(const row of (liveRows||[])){ if(row?.id) map.set(row.id,row); }
+  return [...map.values()];
+}
+
+function deriveVendors(records){
+  const vi=new Map();
+  for(const r of (records||[]).filter(x=>x.recordType==='vendor_matrix')){
+    const n=r?.normalized?.vendorName;
+    if(!n || typeof n!=='string') continue;
+    const key=n.trim().toLowerCase();
+    if(!key) continue;
+    if(!vi.has(key)) vi.set(key,{id:id('vendor',key),vendorName:n.trim(),categories:new Set(),productLines:new Set(),phones:new Set(),locations:new Set(),recordIds:[]});
+    const x=vi.get(key);
+    if(r.category) x.categories.add(r.category);
+    if(r.productLine) x.productLines.add(r.productLine);
+    if(r.normalized.phone) x.phones.add(String(r.normalized.phone));
+    if(r.normalized.address) x.locations.add(String(r.normalized.address));
+    x.recordIds.push(r.id);
+  }
+  return [...vi.values()].map(x=>({
+    id:x.id,vendorName:x.vendorName,categories:[...x.categories].sort(),productLines:[...x.productLines].sort(),
+    phones:[...x.phones].sort(),locations:[...x.locations].sort(),recordIds:x.recordIds,recordCount:x.recordIds.length
+  })).sort((a,b)=>a.vendorName.localeCompare(b.vendorName));
+}
+
+function baselineCounts(){
+  const b=SEED_DATA||{};
+  return {
+    vendorMatrixRecords:Array.isArray(b.vendorMatrixRecords)?b.vendorMatrixRecords.length:Number(b.meta?.vendorMatrixRecordCount||0),
+    solutionMatrixRecords:Array.isArray(b.solutionMatrixRecords)?b.solutionMatrixRecords.length:Number(b.meta?.solutionMatrixRecordCount||0),
+    distinctVendorCount:Array.isArray(b.vendors)?b.vendors.length:Number(b.meta?.distinctVendorCount||0),
+    categoryCount:Array.isArray(b.categories)?b.categories.length:Number(b.meta?.categoryCount||0),
+    knowledgeBaseDocCount:Array.isArray(b.knowledgeBaseDocs)?b.knowledgeBaseDocs.length:Number(b.meta?.knowledgeBaseDocCount||0),
+    referenceDocCount:Array.isArray(b.referenceDocs)?b.referenceDocs.length:Number(b.meta?.referenceDocCount||0),
+    employeeCount:Array.isArray(b.employees)?b.employees.length:Number(b.meta?.employeeCount||0),
+  };
+}
+
+function mergeWithLastKnownGood(live){
+  const base=SEED_DATA||{};
+  const vendorMatrixRecords=mergeById(base.vendorMatrixRecords,live.vendorMatrixRecords);
+  const solutionMatrixRecords=mergeById(base.solutionMatrixRecords,live.solutionMatrixRecords);
+  const vendors=deriveVendors(vendorMatrixRecords);
+  const categories=[...new Set(vendorMatrixRecords.map(r=>r.category).filter(Boolean))].sort();
+  const referenceDocs=mergeById(base.referenceDocs,live.referenceDocs);
+  const knowledgeBaseDocs=mergeById(base.knowledgeBaseDocs,live.knowledgeBaseDocs);
+  const employees=mergeById(base.employees,live.employees);
+  const counts={vendorMatrixRecords:vendorMatrixRecords.length,solutionMatrixRecords:solutionMatrixRecords.length,distinctVendorCount:vendors.length,categoryCount:categories.length,knowledgeBaseDocCount:knowledgeBaseDocs.length,referenceDocCount:referenceDocs.length,employeeCount:employees.length};
+  const baseline=baselineCounts();
+  const missing=Object.keys(baseline).filter(k=>baseline[k]>0 && counts[k]<baseline[k]);
+  if(missing.length) throw new Error(`Merged dashboard dataset failed integrity check: ${missing.map(k=>`${k} ${counts[k]}/${baseline[k]}`).join(', ')}`);
+  const now=new Date().toISOString();
+  return {
+    meta:{
+      generatedAt:now,sourceFiles:['Google Sheets live source + last-known-good retained records'],
+      vendorWorkbookSheetCount:live.vendorSheetsMeta?.length||0,knoWorkbookSheetCount:live.knoSheetsMeta?.length||0,
+      ...counts,sourceSpreadsheetCount:live.meta?.sourceSpreadsheetCount||0,remote:true,merged:true,
+      liveCounts:{
+        vendorMatrixRecords:Array.isArray(live.vendorMatrixRecords)?live.vendorMatrixRecords.length:0,
+        solutionMatrixRecords:Array.isArray(live.solutionMatrixRecords)?live.solutionMatrixRecords.length:0,
+        distinctVendorCount:Array.isArray(live.vendors)?live.vendors.length:0,
+        categoryCount:Array.isArray(live.categories)?live.categories.length:0,
+        knowledgeBaseDocCount:Array.isArray(live.knowledgeBaseDocs)?live.knowledgeBaseDocs.length:0,
+        referenceDocCount:Array.isArray(live.referenceDocs)?live.referenceDocs.length:0,
+        employeeCount:Array.isArray(live.employees)?live.employees.length:0,
+      },
+      retainedFromBaseline:{
+        vendorMatrixRecords:Math.max(0,vendorMatrixRecords.length-(live.vendorMatrixRecords||[]).length),
+        solutionMatrixRecords:Math.max(0,solutionMatrixRecords.length-(live.solutionMatrixRecords||[]).length),
+      },
+      sourceWarnings:live.meta?.sourceWarnings||[],
+      integrity:'passed'
+    },
+    categories,vendors,vendorMatrixRecords,solutionMatrixRecords,
+    vendorSheetsMeta:live.vendorSheetsMeta||[],knoSheetsMeta:live.knoSheetsMeta||[],employees,
+    knowledgeBaseDocs,referenceDocs,
+    categoryMappingReference:live.categoryMappingReference||base.categoryMappingReference
+  };
+}
+
+function seedFallbackBundle(reason){
+  return {...SEED_DATA,meta:{...(SEED_DATA.meta||{}),remote:false,fallback:true,dataSource:'last-known-good-seed',fallbackReason:reason||'Live source was unavailable; retained verified baseline.'}};
+}
+
 async function getDashboardBundle(token){
   const now=Date.now();
-  if(dashboardCache && (now-dashboardCacheAt)<CACHE_TTL_MS) return dashboardCache;
+  if(dashboardCache && now-dashboardCacheAt<CACHE_TTL_MS) return dashboardCache;
   if(dashboardInflight) return dashboardInflight;
   dashboardInflight=buildDashboardBundle(token).then(bundle=>{
-    dashboardCache=bundle;
-    dashboardCacheAt=Date.now();
-    dashboardLastBuildError=null;
-    return bundle;
+    try{
+      const merged=mergeWithLastKnownGood(bundle);
+      dashboardCache=merged; dashboardCacheAt=Date.now(); dashboardLastBuildError=null;
+      return merged;
+    }catch(err){
+      dashboardLastBuildError={message:err.message,at:new Date().toISOString()};
+      const safe=seedFallbackBundle(err.message);
+      dashboardCache=safe; dashboardCacheAt=Date.now();
+      console.warn('[fam-data] live dataset merge rejected; retaining verified baseline',err);
+      return safe;
+    }
   }).catch(err=>{
     dashboardLastBuildError={message:err.message,at:new Date().toISOString()};
     if(dashboardCache) return dashboardCache;
-    throw err;
+    return seedFallbackBundle(err.message);
   }).finally(()=>{dashboardInflight=null;});
   return dashboardInflight;
 }
-
 
 exports.handler=async(event)=>{
   let identity=null;
@@ -301,7 +394,7 @@ exports.handler=async(event)=>{
     }
     if(identity && e.statusCode !== 401 && e.statusCode !== 403){
       headers['X-FAM-Cache']='seed-fallback';
-      const seed = {...SEED_DATA, meta:{...(SEED_DATA.meta||{}), remote:false, fallback:true, fallbackReason:e.message||String(e)}};
+      const seed = seedFallbackBundle(e.message||String(e));
       return{statusCode:200,headers,body:JSON.stringify(cachedBundleFor(identity,seed))};
     }
     const status=e.statusCode||503;
